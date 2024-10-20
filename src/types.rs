@@ -1,29 +1,31 @@
-// trait MaxValue {
-//     const MAX: i8;
-// }
+trait MaxValue {
+    const MAX: u8;
+}
 
-// struct SizedInt<T: MaxValue>(i8, std::marker::PhantomData<T>);
+#[derive(Debug, PartialEq)]
+pub struct SizedInt<T: MaxValue>(u8, std::marker::PhantomData<T>);
 
-// impl<T: MaxValue> SizedInt<T> {
-//     fn new(value: i8) -> Result<Self, &'static str> {
-//         if value <= T::MAX {
-//             Ok(SizedInt(value, std::marker::PhantomData))
-//         } else {
-//             Err("Value out of range for the specified size")
-//         }
-//     }
+impl<T: MaxValue> SizedInt<T> {
+    pub fn new(value: u8) -> Result<Self, &'static str> {
+        if value <= T::MAX {
+            Ok(SizedInt(value, std::marker::PhantomData))
+        } else {
+            Err("Value out of range for the specified size.")
+        }
+    }
 
-//     fn value(&self) -> i8 {
-//         self.0
-//     }
-// }
+    pub fn value(&self) -> u8 {
+        self.0
+    }
+}
 
-// // Implement MaxValue for 3-bit size
-// pub struct ThreeBit;
+// Implement MaxValue for 3-bit size
+#[derive(Debug, PartialEq)]
+pub struct ThreeBit;
 
-// impl MaxValue for ThreeBit {
-//     const MAX: i8 = 7;
-// }
+impl MaxValue for ThreeBit {
+    const MAX: u8 = 7;
+}
 
 // // Example usage
 // fn main() {
@@ -46,33 +48,33 @@ pub enum ProductType {
     KitchenTimer = 2,
 }
 
-// #[derive(Debug)]
-// pub enum ProbeMode {
-//     Normal = 0,
-//     InstantRead = 1,
-//     Reserved = 2,
-//     Error = 3,
-// }
+#[derive(Debug, PartialEq)]
+pub enum ProbeMode {
+    Normal = 0,
+    InstantRead = 1,
+    Reserved = 2,
+    Error = 3,
+}
 
-// #[derive(Debug)]
-// pub enum Color {
-//     Yellow = 0,
-//     Grey = 1,
-//     // 2-7 TBD
-// }
+#[derive(Debug, PartialEq)]
+pub enum Color {
+    Yellow = 0,
+    Grey = 1,
+    // 2-7 TBD
+}
 
-// #[derive(Debug)]
+// #[derive(Debug, PartialEq)]
 // pub enum BatteryStatus {
 //     Ok = 0,
 //     Low = 1,
 // }
 
 pub struct ProbeAdvertisement {
-    // pub vendor_id: String,
+    // pub battery_status: BatteryStatus,
+    pub color: Color,
+    pub id: SizedInt<ThreeBit>,
+    pub mode: ProbeMode,
     pub product_type: ProductType,
     pub serial_number: String,
-    // pub mode: ProbeMode,
-    // pub color: Color,
-    // pub id: ThreeBit,
-    // pub battery_status: BatteryStatus,
+    // pub vendor_id: String,
 }
