@@ -6,13 +6,18 @@
 
 ## TODO
 
-- [ ] Get the BLE connection working in the CLI
-  - [ ] Find the probe
-  - [ ] Find the repeater
-  - [ ] Log advertising packets
+- [x] Get the BLE connection working in the CLI
+  - [x] Find the probe
+  - [x] Find the repeater
+  - [x] Log advertising packets
 - [ ] Get the connection working in Rust
-  - [ ] Find the probe
-  - [ ] Find the repeater
+  - [x] Find the probe
+  - [x] Find the repeater
   - [ ] Log advertising packets
   - [ ] Read other data from the probe status service
   - [ ] Use the UART service
+
+# Notes
+
+- Needed to run `sudo apt install libdbus-1-dev pkg-config` to get the `dbus` crate to compile. Might be needed on runtime?
+- Ignore the serial number for now, they do weird stuff with it: https://github.com/combustion-inc/combustion-ios-ble/blob/main/Sources/CombustionBLE/BleData/AdvertisingData.swift#L83-L98
