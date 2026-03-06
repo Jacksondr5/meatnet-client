@@ -232,5 +232,6 @@ Supported commands (MVP): Set Prediction, Configure Food Safe, Reset Food Safe, 
 Manages the connection to Convex:
 
 - **Write batching** — Temperature readings arrive every few seconds per probe across multiple probes. Batches writes to avoid excessive Convex mutations.
+- **Fixed-interval persistence** — Temperature readings are sampled before persistence at a fixed cadence (default `5s`, configurable to `1s`) to reduce storage/write load while preserving useful history resolution.
 - **Command polling** — Polls the commands table via HTTP every 1-2 seconds for pending commands.
 - **Offline buffering** — If internet connectivity drops, buffers data locally and flushes when reconnected to avoid data loss during cooks.

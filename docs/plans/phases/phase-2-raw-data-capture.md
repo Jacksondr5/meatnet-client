@@ -1358,8 +1358,8 @@ pub async fn run(event_tx: broadcast::Sender<BleEvent>, port: u16) {
         .route("/ws", get(ws_upgrade_handler))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    log::info!("Debug server listening on http://0.0.0.0:{}/debug", port);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    log::info!("Debug server listening on http://127.0.0.1:{}/debug", port);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -1465,10 +1465,11 @@ Run: `RUST_LOG=info cargo run`
 Expected:
 
 ```
-[INFO] Debug server listening on http://0.0.0.0:3001/debug
+[INFO] Debug server listening on http://127.0.0.1:3001/debug
 ```
 
-Open `http://<pi-ip>:3001/debug` in a browser — should show the placeholder page.
+Open `http://127.0.0.1:3001/debug` on the SBC — should show the placeholder page.
+If LAN debug mode is explicitly enabled, use `http://<pi-ip>:3001/debug`.
 
 **Step 6: Commit**
 
@@ -1788,7 +1789,8 @@ Expected: Compiles (the HTML is embedded at compile time via `include_str!`).
 
 Run: `RUST_LOG=info cargo run`
 
-Open `http://<pi-ip>:3001/debug` in a browser.
+Open `http://127.0.0.1:3001/debug` in a browser on the SBC.
+If LAN debug mode is explicitly enabled, use `http://<pi-ip>:3001/debug`.
 
 Expected:
 
@@ -1960,7 +1962,8 @@ git commit -m "feat: captured BLE test fixtures for Phase 3 protocol decoding"
    RUST_LOG=info cargo run
    ```
 
-   Open `http://<pi-ip>:3001/debug` — verify events stream in the browser:
+   Open `http://127.0.0.1:3001/debug` on the SBC — verify events stream in the browser:
+   if LAN debug mode is explicitly enabled, use `http://<pi-ip>:3001/debug`.
    - [ ] WebSocket connects and shows "connected"
    - [ ] ADV events appear with product type and serial
    - [ ] UART events appear with message type names

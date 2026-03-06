@@ -99,6 +99,12 @@ All ingest mutations must be idempotent upserts keyed by canonical keys.
 - `timestamp` is display-oriented sample time; `capturedAt` is ingestion time.
 - Late arrivals are accepted if key is new.
 
+## Temperature Persistence Cadence (MVP)
+
+- Persist `temperatureReadings` at a fixed interval cadence (default `5s`, configurable to `1s`).
+- Do not use delta-triggered variable-interval writes in MVP.
+- Apply the same cadence policy to both live ingest and backfill materialization before writing to Convex.
+
 ## Command Reliability Contract
 
 ## Command States

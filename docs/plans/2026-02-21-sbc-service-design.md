@@ -129,7 +129,7 @@ Supported commands (MVP): Set Prediction, Configure Food Safe, Reset Food Safe, 
 
 Manages the connection to Convex:
 
-- **Write batching** — Temperature readings arrive every few seconds per probe across multiple probes. Batches writes to avoid excessive Convex mutations.
+- **Fixed-interval persistence** — Temperature readings are sampled before persistence at a fixed cadence (default `5s`, configurable to `1s`) to keep write volume predictable.
 - **Command polling** — Polls the commands table via HTTP every 1-2 seconds for pending commands.
 - **Durable local spool** — Appends outbound events to a local durable spool before Convex materialization and replays it on reconnect/startup.
 - **Credential lifecycle (minimal)** — Uses one provisioned SBC service credential stored locally with strict file permissions, validates it at startup, and rotates/revokes only on explicit reprovision or suspected key leak.

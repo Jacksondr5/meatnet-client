@@ -1962,7 +1962,8 @@ Expected: All tests pass, builds successfully.
 
 Run: `RUST_LOG=info cargo run`
 
-Open `http://<pi-ip>:3001/debug`. ProbeStatus rows should now show a clickable "Parsed" element that expands to reveal the full decoded JSON (temperatures, prediction state, food safety, etc.).
+Open `http://127.0.0.1:3001/debug` on the SBC. ProbeStatus rows should now show a clickable "Parsed" element that expands to reveal the full decoded JSON (temperatures, prediction state, food safety, etc.).
+If LAN debug mode is explicitly enabled, use `http://<pi-ip>:3001/debug`.
 
 **Step 7: Commit**
 
@@ -1997,7 +1998,8 @@ git commit -m "feat: parsed protocol data in debug server (side-by-side raw + de
    RUST_LOG=info cargo run
    ```
 
-   Open `http://<pi-ip>:3001/debug`:
+   Open `http://127.0.0.1:3001/debug` on the SBC:
+   if LAN debug mode is explicitly enabled, use `http://<pi-ip>:3001/debug`.
    - [ ] ProbeStatus rows show "Parsed" toggle
    - [ ] Parsed data includes correct temperatures (compare with Combustion app)
    - [ ] Prediction state matches what the Combustion app shows

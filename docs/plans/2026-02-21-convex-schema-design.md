@@ -187,7 +187,7 @@ Command: Set prediction to 95C on Probe #1
 
 ## Key Design Decisions
 
-- **Temperature readings are separate from predictions/food safety** — Temps arrive every few seconds and are high volume. Predictions and food safety only need to be recorded when their state changes, keeping those tables smaller and queries faster.
+- **Temperature persistence uses fixed-interval sampling** — Store readings at a fixed cadence (default `5s`, configurable to `1s`) for predictable chart density and lower write volume.
 
 - **`sequenceNumber` on temperature readings** — Maps directly to the probe's internal log sequence. Makes backfill straightforward: query "what's my max sequence number for this session?" and request logs starting from there.
 
@@ -204,7 +204,59 @@ Command: Set prediction to 95C on Probe #1
 
 ## Required Indexes and Uniqueness Constraints
 
+### Uniqueness Constraints (logical)
+
+- `devices`: unique on `(ownerId, serialNumber)`.
+- `cookSessions`: unique on `(deviceId, sessionId)`.
 - `temperatureReadings`: unique on `(sessionId, sequenceNumber)` for idempotent replay.
 - `predictionSnapshots`: unique on `(sessionId, transitionOrdinal)`.
 - `foodSafetySnapshots`: unique on `(sessionId, transitionOrdinal)`.
 - `deviceCommands`: command id is unique identity; state transitions must enforce compare-and-set on `(id, leaseVersion, status)`.
+
+### Query Indexes (recommended)
+
+- `devices`
+  - `by_owner_serial` on `(ownerId, serialNumber)`
+  - `by_owner_lastSeen` on `(ownerId, lastSeen)`
+- `cookSessions`
+  - `by_owner_active` on `(ownerId, endTime, startTime)` for active-cook dashboard and session bar
+  - `by_owner_start` on `(ownerId, startTime)` for history page and date filtering
+  - `by_device_session` on `(deviceId, sessionId)` for session detection/idempotent creation
+- `temperatureReadings`
+  - `by_session_sequence` on `(sessionId, sequenceNumber)` for backfill reconciliation and dedup checks
+  - `by_session_timestamp` on `(sessionId, timestamp)` for chart range queries and time-ordered rendering
+  - optional: `by_session_capturedAt` on `(sessionId, capturedAt)` for ingest lag diagnostics
+- `predictionSnapshots`
+  - `by_session_transition` on `(sessionId, transitionOrdinal)`
+  - `by_session_timestamp` on `(sessionId, timestamp)`
+- `foodSafetySnapshots`
+  - `by_session_transition` on `(sessionId, transitionOrdinal)`
+  - `by_session_timestamp` on `(sessionId, timestamp)`
+- `deviceCommands`
+  - `by_owner_status_created` on `(ownerId, status, createdAt)` for command inbox/UX
+  - `by_device_status_created` on `(deviceSerialNumber, status, createdAt)` for device-scoped command history
+  - `by_status_expires` on `(status, expiresAt)` for expiry sweeps
+- `networkTopology`
+  - `by_gateway_timestamp` on `(gatewaySerialNumber, timestamp)`
+  - `by_node_timestamp` on `(nodeSerialNumber, timestamp)`
+- `heartbeats`
+  - `by_node_timestamp` on `(nodeSerialNumber, timestamp)`
+  - `by_timestamp` on `(timestamp)` for retention sweeps
+
+### Implementation Note on Uniqueness in Convex
+
+Convex does not provide SQL-style declarative unique constraints in schema definitions. Enforce logical uniqueness via:
+
+1. index-backed lookup in mutation,
+2. reject on existing document,
+3. perform write in the same mutation transaction.
+
+This is safe with Convex's serializable mutation model and automatic conflict retries.
+
+## Sampling and Query Scalability Notes
+
+- Persist temperature history at a fixed interval before writing to Convex (default `5s`, configurable to `1s`).
+- Do not use delta-triggered variable-interval writes in MVP.
+- Keep timestamps as captured so chart spacing is stable and predictable.
+- Keep `predictionSnapshots` and `foodSafetySnapshots` transition-only to avoid per-reading amplification.
+- Treat `heartbeats` as high-churn diagnostics; prefer coarse queries and short retention windows.

@@ -63,8 +63,8 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 - `web-app/` project setup (Next.js + Convex)
 - Convex schema: `devices`, `cookSessions`, `temperatureReadings`, `predictionSnapshots`, `foodSafetySnapshots`, `deviceCommands`, `networkTopology`, `heartbeats`
-- Mutations: ingest temperature readings (batched), create sessions, record prediction/food safety snapshots, register devices
-- Queries: active sessions, session readings (with downsampling), device list, command queue
+- Mutations: ingest temperature readings (fixed-interval cadence), create sessions, record prediction/food safety snapshots, register devices
+- Queries: active sessions, session readings, device list, command queue
 - Convex function tests
 - **Can be developed in parallel with Phase 3**
 
@@ -86,7 +86,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 **Milestone: "Data flows from probe → SBC → Convex automatically"**
 
 - Session manager — detect new sessions from session ID changes, create/end sessions in Convex
-- Convex sync layer — reqwest HTTP client, write batching, command polling
+- Convex sync layer — reqwest HTTP client, fixed-interval persistence, command polling
 - Main application loop wiring: BLE → decode → session manager → Convex sync
 - SBC startup: query Convex for active sessions, reconnect, resume
 - Durable local spooling for outbound Convex events

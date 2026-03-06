@@ -47,7 +47,7 @@ Rationale:
 
 - Real-time subscription model fits live cook monitoring
 - Straightforward command queue flow between web UI and SBC
-- Sufficient scale for MVP with write batching and read-time downsampling for long histories
+- Sufficient scale for MVP with fixed-interval persistence (default 5s cadence) for long histories
 
 ### Web App: Next.js on Vercel
 
@@ -84,5 +84,5 @@ Rationale:
 
 ## Operational Notes
 
-- Historical chart queries should use downsampling for large ranges and full resolution when zoomed in.
+- Historical chart resolution is controlled at ingest using fixed-interval persistence (default 5s, configurable to 1s).
 - Reliability semantics (durability, idempotency, command leasing, degraded states) are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).

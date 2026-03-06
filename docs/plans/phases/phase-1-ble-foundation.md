@@ -769,7 +769,7 @@ Verify:
 - TX characteristic is found
 - Notification subscription succeeds
 - Raw bytes stream in continuously
-- ProbeStatus (0x45) messages appear every few seconds per probe
+- ProbeStatus (0x45) messages appear periodically per probe
 - Heartbeat (0x49) messages appear periodically
 - Message type labels are correct
 
@@ -1119,7 +1119,7 @@ Run these checks to confirm Phase 1 is complete:
    - [ ] MeatNet node is discovered and identified as a node
    - [ ] GATT connection to node succeeds
    - [ ] UART TX notifications stream in continuously
-   - [ ] ProbeStatus (0x45) messages appear every few seconds
+   - [ ] ProbeStatus (0x45) messages appear periodically
    - [ ] Heartbeat (0x49) messages appear periodically
    - [ ] Power-cycling the node triggers reconnection with backoff
    - [ ] Reconnection succeeds and data resumes after node powers back on
