@@ -1,7 +1,5 @@
 # Phase 1: BLE Foundation Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Establish BLE connectivity to Combustion Inc devices — scan for advertising packets, connect to a MeatNet node via GATT, and receive raw UART bytes.
 
 **Architecture:** The SBC service is a Rust async application using bluer (BlueZ D-Bus interface) for all BLE operations. It runs a passive advertising scanner and a GATT connection to one MeatNet node concurrently using tokio. Raw bytes are logged to console for verification. This phase produces no parsed data — just raw bytes flowing from hardware through BLE to the console.
