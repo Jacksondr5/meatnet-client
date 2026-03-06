@@ -68,6 +68,14 @@ MVP scope:
 
 **Next.js Web App (Vercel)** — User-facing interface. Subscribes to Convex for live data during cooks. Provides historical analysis, cook comparison views, and a read-only network diagnostics page for mesh-health visibility. Writes probe control commands to Convex.
 
+### Security and Access Model (MVP)
+
+- Deployment model is a single-user household with one provisioned SBC.
+- Data access is owner-scoped in Convex (`ownerId`) for devices, sessions, and commands.
+- SBC uses one long-lived service credential stored locally with strict permissions.
+- Credential rotation/revocation is explicit and manual (reprovision/reset/suspected leak).
+- Debug server is loopback-only by default; LAN access is opt-in and token-gated.
+
 ### BLE Strategy: Node Gateway + Passive Scan
 
 The SBC connects to one MeatNet node (e.g., repeater or display) as its gateway to the probe network. This mirrors how the official Combustion app works for probe data.
@@ -130,6 +138,7 @@ Reliability guarantees and degraded-mode behavior are defined in [2026-03-06-rel
 - **Probe control during active cooks** — Prediction, food safety, and alarms from the web UI
 - **Resilient** — Passive advertising scan as fallback, log backfill for gap recovery
 - **Mesh observability** — Track heartbeat freshness and link RSSI to diagnose network issues
+- **Pragmatic security** — Keep setup simple while enforcing owner boundaries and basic local-network hardening defaults
 
 ## SBC Service Internals
 

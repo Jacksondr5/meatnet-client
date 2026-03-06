@@ -132,3 +132,13 @@ Manages the connection to Convex:
 - **Write batching** — Temperature readings arrive every few seconds per probe across multiple probes. Batches writes to avoid excessive Convex mutations.
 - **Command polling** — Polls the commands table via HTTP every 1-2 seconds for pending commands.
 - **Durable local spool** — Appends outbound events to a local durable spool before Convex materialization and replays it on reconnect/startup.
+- **Credential lifecycle (minimal)** — Uses one provisioned SBC service credential stored locally with strict file permissions, validates it at startup, and rotates/revokes only on explicit reprovision or suspected key leak.
+- **Least privilege scope** — SBC credential is limited to required ingest and command-queue operations.
+
+### Debug Server Access Policy (MVP)
+
+- Default bind address is loopback-only (`127.0.0.1`).
+- Optional LAN access requires explicit config enablement.
+- When LAN mode is enabled, require a shared debug token.
+- Debug endpoints are read-only by default.
+- Debug server can be disabled entirely by configuration.

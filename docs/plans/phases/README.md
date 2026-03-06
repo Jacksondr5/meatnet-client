@@ -70,7 +70,19 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 ---
 
-## Phase 5: SBC Application Core
+## Phase 5: Auth + Provisioning Foundation
+**Milestone: "Web users and SBC machine identity are both authenticated and owner-scoped"**
+
+- Clerk + Convex auth integration for web app user sessions
+- Define single-user household ownership model (`ownerId`) and enforce owner-scoped reads/writes
+- Provision one SBC machine principal (M2M) per deployment
+- SBC credential storage and startup validation path
+- Credential rotation/revocation workflow (manual reprovision + recovery UX)
+- Basic auth observability: token/lease failures surfaced in logs and UI status
+
+---
+
+## Phase 6: SBC Application Core
 **Milestone: "Data flows from probe → SBC → Convex automatically"**
 
 - Session manager — detect new sessions from session ID changes, create/end sessions in Convex
@@ -82,7 +94,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 ---
 
-## Phase 6: Web App MVP
+## Phase 7: Web App MVP
 **Milestone: "I can see live cook data in a web browser"**
 
 - Convex client integration with real-time subscriptions
@@ -94,7 +106,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 ---
 
-## Phase 7: Commands + Device Control
+## Phase 8: Commands + Device Control
 **Milestone: "I can control probes from the web"**
 
 - Command handler in SBC — poll Convex, encode UART commands, send via node, match responses
@@ -105,7 +117,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 ---
 
-## Phase 8: Log Backfill + Resilience
+## Phase 9: Log Backfill + Resilience
 **Milestone: "System recovers gracefully from any failure"**
 
 - Log backfill — Read Logs (`0x04`) request/response, gap detection, sequence-based backfill
@@ -116,7 +128,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 ---
 
-## Phase 9: Network Health
+## Phase 10: Network Health
 **Milestone: "Full mesh visibility and developer tooling"**
 
 - Heartbeat (`0x49`) parsing and storage
@@ -127,7 +139,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 ---
 
-## Phase 10: Web App Polish
+## Phase 11: Web App Polish
 **Milestone: "Feature-complete web application"**
 
 - Cook history page with search/filter
@@ -142,10 +154,11 @@ This document outlines the implementation phases for the MeatNet Companion syste
 ## Parallelization Notes
 
 - **Phases 3 and 4 can run in parallel** (protocol decoding and Convex schema are independent)
+- **Phase 5 should complete before Phases 6-8** so SBC ingest/commands and web actions are auth-scoped from day one
 - The debug server grows incrementally across phases:
   - Phase 1: n/a
   - Phase 2: raw hex display
   - Phase 3: raw + parsed side-by-side
-  - Phase 5+: session state, Convex sync status
-- The first time you see data in a browser is after Phase 6 — Phases 1-5 are infrastructure
-- Phases 8-10 are "polish and completeness" — the core system works after Phase 7
+  - Phase 6+: session state, Convex sync status
+- The first time you see data in a browser is after Phase 7 — Phases 1-6 are infrastructure
+- Phases 9-11 are "polish and completeness" — the core system works after Phase 8

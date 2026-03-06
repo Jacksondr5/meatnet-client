@@ -6,6 +6,8 @@ The Convex schema serves as the real-time data store and bidirectional communica
 
 Reliability semantics (durability, idempotency, lease-based command execution) are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
 
+Access model for MVP is single-user household with explicit data ownership boundaries.
+
 ## Tables
 
 ### `devices`
@@ -17,6 +19,7 @@ Registry of known Combustion devices used by MVP.
 | `serialNumber` | string | Unique device identifier (4-byte hex for probes, 10-byte for nodes) |
 | `productType` | enum | `probe`, `node` |
 | `nodeType` | enum? | `repeater`, `display`, `booster` (for node devices) |
+| `ownerId` | string | Household/user owner boundary for all device-scoped queries/mutations |
 | `name` | string? | User-assigned friendly name (e.g., "Brisket probe") |
 | `firmwareRevision` | string? | Last known firmware version |
 | `hardwareRevision` | string? | Last known hardware version |
@@ -29,6 +32,7 @@ One record per cook session per probe. A new session is created when the probe g
 | Field | Type | Description |
 |-------|------|-------------|
 | `deviceId` | Id\<devices\> | Reference to the device |
+| `ownerId` | string | Household/user owner boundary (must match referenced device owner) |
 | `sessionId` | number | The probe session ID (random uint32) |
 | `startTime` | number | When the session was first detected |
 | `endTime` | number? | When the session ended (null if active) |
@@ -91,6 +95,7 @@ Command queue with full acknowledgement tracking. Commands flow from the web UI 
 | Field | Type | Description |
 |-------|------|-------------|
 | `deviceSerialNumber` | string | Target device serial number |
+| `ownerId` | string | Household/user owner boundary used for command authorization |
 | `commandType` | enum | `setPrediction`, `configFoodSafe`, `resetFoodSafe`, `setAlarms`, `silenceAlarms` |
 | `payload` | object | Command-specific parameters |
 | `status` | enum | `pending`, `leased`, `sent`, `succeeded`, `failed`, `expired`, `cancelled` |
@@ -193,6 +198,7 @@ Command: Set prediction to 95C on Probe #1
 - **Mesh telemetry stored separately** — Heartbeats/topology are operational diagnostics and should not be coupled to cook sessions. Separate tables keep cook analytics clean while enabling a network health UI.
 
 - **Commands table as a lease-backed queue** — Lease-based state machine (`pending` → `leased` → `sent` → terminal) with compare-and-set transitions, timestamps, retries, and typed terminal reasons.
+- **Single-user ownership boundaries** — MVP is single-user household, but all device/session/command writes include `ownerId` and all reads are owner-scoped to prevent cross-data mixing.
 
 - **Snapshot tables for state changes** — Prediction and food safety data is captured only when state changes, not on every temperature reading. This keeps the data manageable while still providing a complete timeline of the cook.
 
