@@ -4,9 +4,7 @@
 
 The SBC service is a Rust process that runs on a Raspberry Pi near the grill. It bridges the BLE protocol world with the Convex cloud backend using bluer for BLE communication and reqwest for Convex HTTP API calls.
 
-> **Note:** Originally designed as TypeScript/Node.js. Changed to Rust after the tech stack review
-> for BLE reliability (bluer vs noble), binary parsing ergonomics, and minimal memory footprint.
-> See [Tech Stack Review](./2026-02-21-tech-stack-review.md) for the full analysis.
+Runtime reliability and recovery semantics are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
 
 ## Internal Architecture
 
@@ -95,7 +93,7 @@ Backfilled log records do not include wall-clock time, so timestamps are reconst
    `estimatedTimestampMs = anchorTimestampMs - ((anchorSequence - s) * samplePeriodMs)`
 3. **No anchor fallback** — If no post-reconnect live packet exists yet, use reconnect time as temporary anchor and mark all derived points as `backfillEstimated`.
 4. **Provenance** — Store `capturedAt` as ingest time and `timestampSource = backfillEstimated` for all reconstructed points.
-5. **Stability rule** — Do not rewrite timestamps once persisted unless an explicit repair job is run.
+5. **MVP stability rule** — Persist provenance (`timestampSource`, `timestampConfidence`) and do not run automatic timestamp rewrites.
 
 ### Network Health Monitor
 
@@ -118,12 +116,12 @@ Tracks mesh-level diagnostics from the connected node:
 Polls the Convex commands table via HTTP for pending commands. When a new command is found:
 
 1. Checks `expiresAt` — skips expired commands (marks as `failed` with error `"expired"`)
-2. Updates command status to `received` with `receivedAt` timestamp
+2. Acquires an execution lease (`pending` → `leased`) using compare-and-set semantics
 3. Encodes as a UART request message with proper header and CRC
 4. Sends via the node gateway's UART RX characteristic
 5. Updates status to `sent` with `sentAt` timestamp
 6. Waits for response on TX characteristic (matched by request ID)
-7. Updates status to `success` or `failed` with `completedAt` timestamp
+7. Updates status to a terminal state (`succeeded` or `failed`) with `completedAt` timestamp
 
 Supported commands (MVP): Set Prediction, Configure Food Safe, Reset Food Safe, Set Probe Alarms, Silence Alarms.
 
@@ -133,4 +131,4 @@ Manages the connection to Convex:
 
 - **Write batching** — Temperature readings arrive every few seconds per probe across multiple probes. Batches writes to avoid excessive Convex mutations.
 - **Command polling** — Polls the commands table via HTTP every 1-2 seconds for pending commands.
-- **Offline buffering** — If internet connectivity drops, buffers data locally and flushes when reconnected to avoid data loss during cooks.
+- **Durable local spool** — Appends outbound events to a local durable spool before Convex materialization and replays it on reconnect/startup.

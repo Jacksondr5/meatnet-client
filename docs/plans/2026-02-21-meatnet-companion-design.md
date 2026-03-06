@@ -101,9 +101,9 @@ Probe-focused capture:
 Bidirectional communication flows through Convex:
 
 1. Web UI writes a command record to a Convex commands table (e.g., "set prediction to 203F on probe serial X")
-2. SBC polls the commands table via HTTP and picks up new pending commands
+2. SBC polls the commands table via HTTP and leases pending commands for execution
 3. SBC encodes the command per the UART protocol and sends it to the device via the node gateway
-4. SBC writes the command result (success/failure) back to Convex
+4. SBC writes the command terminal outcome (`succeeded`, `failed`, `expired`, or `cancelled`) back to Convex
 5. Web UI sees the result via its Convex subscription
 
 ### Technology Stack
@@ -120,8 +120,7 @@ Bidirectional communication flows through Convex:
 | SBC Hardware | Raspberry Pi |
 | Repo Structure | Monorepo with workspace dirs |
 
-> **Note:** The SBC service was changed from TypeScript to Rust after the tech stack review.
-> See [Tech Stack Review](./2026-02-21-tech-stack-review.md) for the full analysis.
+Reliability guarantees and degraded-mode behavior are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
 
 ### Design Goals
 

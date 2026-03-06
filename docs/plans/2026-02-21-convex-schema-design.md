@@ -4,6 +4,8 @@
 
 The Convex schema serves as the real-time data store and bidirectional communication layer between the SBC service and the Next.js web app. It must support both high-frequency real-time streaming during cooks and efficient historical queries for cook analysis.
 
+Reliability semantics (durability, idempotency, lease-based command execution) are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
+
 ## Tables
 
 ### `devices`
@@ -43,7 +45,8 @@ Time-series temperature data. This is the highest-volume table.
 | `sequenceNumber` | number | Probe log sequence number |
 | `timestamp` | number | Estimated sample time (epoch ms, derived from sequence and sample period) |
 | `capturedAt` | number | When SBC received or backfilled this reading (epoch ms) |
-| `timestampSource` | enum | `liveObserved`, `backfillEstimated` |
+| `timestampSource` | enum | `liveObserved`, `backfillEstimated`, `repairedEstimated` |
+| `timestampConfidence` | enum | `high`, `medium`, `low` |
 | `temperatures` | number[] | All 8 sensor temps in C (probe) |
 | `virtualCore` | number? | Index of sensor the probe considers "core" |
 | `virtualSurface` | number? | Index of sensor the probe considers "surface" |
@@ -64,6 +67,7 @@ Prediction state changes. Recorded when prediction state changes, not on every t
 | `heatStartCelsius` | number | Core temp when heating began |
 | `secondsRemaining` | number | Predicted seconds to target |
 | `estimatedCoreCelsius` | number | Estimated current core temp |
+| `transitionOrdinal` | number | Monotonic transition number within the session |
 
 ### `foodSafetySnapshots`
 
@@ -78,6 +82,7 @@ Food safety state changes. Recorded when food safety state changes.
 | `product` | string | Food category |
 | `logReduction` | number | Achieved log reduction |
 | `secondsAboveThreshold` | number | Time spent above safe temp |
+| `transitionOrdinal` | number | Monotonic transition number within the session |
 
 ### `deviceCommands`
 
@@ -88,16 +93,21 @@ Command queue with full acknowledgement tracking. Commands flow from the web UI 
 | `deviceSerialNumber` | string | Target device serial number |
 | `commandType` | enum | `setPrediction`, `configFoodSafe`, `resetFoodSafe`, `setAlarms`, `silenceAlarms` |
 | `payload` | object | Command-specific parameters |
-| `status` | enum | `pending`, `received`, `sent`, `success`, `failed` |
+| `status` | enum | `pending`, `leased`, `sent`, `succeeded`, `failed`, `expired`, `cancelled` |
+| `attemptCount` | number | Number of execution attempts so far |
+| `maxAttempts` | number | Maximum allowed attempts for this command |
+| `leasedBy` | string? | SBC instance identifier holding the current lease |
+| `leaseVersion` | number? | Monotonic lease version for compare-and-set transitions |
+| `leaseExpiresAt` | number? | When the current lease expires |
 | `createdAt` | number | When the web UI created the command |
-| `receivedAt` | number? | When the SBC picked it up from Convex |
 | `sentAt` | number? | When the SBC wrote it to BLE |
 | `completedAt` | number? | When the device response arrived |
 | `requestId` | number? | The UART request ID (uint32) used for response matching |
 | `responseId` | number? | The UART response ID from the device |
 | `ttlSeconds` | number | How long the command is valid (default: 30) |
 | `expiresAt` | number | `createdAt + ttlSeconds * 1000` |
-| `error` | string? | Error message if failed |
+| `reasonCode` | enum? | `expired`, `ble_unavailable`, `device_timeout`, `protocol_error`, `validation_error`, `cancelled_by_user` |
+| `error` | string? | Additional details if failed |
 
 ### `networkTopology`
 
@@ -136,13 +146,15 @@ Raw heartbeat stream from node heartbeat messages for freshness and link quality
 #### Command Status Progression
 
 ```
-pending → received → sent → success
-                         → failed
+pending → leased → sent → succeeded
+                     ↘
+                      failed / expired / cancelled
 
-At any step, can transition to failed:
-- pending → failed (expired: SBC didn't pick it up before TTL)
-- received → failed (BLE connection unavailable)
-- sent → failed (device did not respond within 5s)
+At any step, terminal transitions may occur when applicable:
+- pending/leased → expired (TTL exceeded)
+- leased → failed (BLE connection unavailable, protocol error, validation error)
+- sent → failed (device timeout or explicit device error)
+- pending/leased → cancelled (user initiated)
 ```
 
 #### Command Acknowledgement Flow
@@ -154,18 +166,18 @@ The web UI can display this as a progress indicator:
 ```
 Command: Set prediction to 95C on Probe #1
 [x] Queued          (14:32:01)
-[x] SBC received    (14:32:01)  <- ~instant via Convex sync
+[x] SBC leased      (14:32:01)  <- command owned for execution
 [x] Sent to device  (14:32:02)  <- BLE write confirmed
-[x] Device confirmed (14:32:02) <- UART response success
+[x] Device confirmed (14:32:02) <- UART response success (`succeeded`)
 ```
 
 #### Timeout Handling
 
 | Transition | Timeout | Behavior |
 |-----------|---------|----------|
-| `pending` → `received` | 30s (client-side) | Web UI shows "SBC appears offline" warning. Command stays pending for SBC to pick up later. |
-| `received` → `sent` | 10s | SBC sets status to `failed`, error: `"BLE connection unavailable"` |
-| `sent` → `success`/`failed` | 5s | SBC sets status to `failed`, error: `"Device did not respond"` |
+| `pending` → `leased` | 30s (client-side expectation) | Web UI may show command queue delay; command remains eligible for lease until expiry. |
+| `leased` → `sent` | 10s | SBC sets terminal failure with `reasonCode=\"ble_unavailable\"` when BLE path cannot be established. |
+| `sent` → `succeeded`/`failed` | 5s | SBC sets terminal failure with `reasonCode=\"device_timeout\"` when response does not arrive in window. |
 | Any → expired | `ttlSeconds` | SBC checks `expiresAt` before executing. Skips expired commands with error: `"expired"` |
 
 ## Key Design Decisions
@@ -176,9 +188,17 @@ Command: Set prediction to 95C on Probe #1
 
 - **Dual timestamps for backfill correctness** — Log backfill responses do not include wall-clock time. Store both `timestamp` (estimated sample time) and `capturedAt` (ingestion time) plus `timestampSource` so charts stay continuous while preserving provenance.
 - **Deterministic timestamp anchoring** — For backfill, anchor reconstruction to the first post-reconnect live Probe Status sequence/timestamp pair and derive historical sample times from `samplePeriodMs`.
+- **Timestamp confidence provenance** — Persist `timestampConfidence` to distinguish high-confidence live timestamps from temporary-anchor estimates.
 
 - **Mesh telemetry stored separately** — Heartbeats/topology are operational diagnostics and should not be coupled to cook sessions. Separate tables keep cook analytics clean while enabling a network health UI.
 
-- **Commands table as a queue with full acknowledgement** — Four-step state machine (`pending` → `received` → `sent` → `success`/`failed`) with timestamps at each step. Enables the web UI to show real-time command progress. TTL and expiration prevent stale command execution.
+- **Commands table as a lease-backed queue** — Lease-based state machine (`pending` → `leased` → `sent` → terminal) with compare-and-set transitions, timestamps, retries, and typed terminal reasons.
 
 - **Snapshot tables for state changes** — Prediction and food safety data is captured only when state changes, not on every temperature reading. This keeps the data manageable while still providing a complete timeline of the cook.
+
+## Required Indexes and Uniqueness Constraints
+
+- `temperatureReadings`: unique on `(sessionId, sequenceNumber)` for idempotent replay.
+- `predictionSnapshots`: unique on `(sessionId, transitionOrdinal)`.
+- `foodSafetySnapshots`: unique on `(sessionId, transitionOrdinal)`.
+- `deviceCommands`: command id is unique identity; state transitions must enforce compare-and-set on `(id, leaseVersion, status)`.

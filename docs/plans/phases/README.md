@@ -4,7 +4,7 @@
 
 This document outlines the implementation phases for the MeatNet Companion system. Each phase produces a concrete, testable milestone. Phases are ordered by dependency — later phases build on earlier ones.
 
-**Design documents:** `docs/plans/2026-02-21-*.md`
+**Design documents:** `docs/plans/2026-02-21-*.md`, `docs/plans/2026-03-06-reliability-contract-design.md`
 **BLE protocol specs:** `external-docs/`
 **Detailed phase plans:** `docs/plans/phases/phase-N-*.md`
 
@@ -77,7 +77,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 - Convex sync layer — reqwest HTTP client, write batching, command polling
 - Main application loop wiring: BLE → decode → session manager → Convex sync
 - SBC startup: query Convex for active sessions, reconnect, resume
-- Offline buffering (in-memory with disk spillover)
+- Durable local spooling for outbound Convex events
 - **First end-to-end data flow from hardware to cloud**
 
 ---
@@ -101,7 +101,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 - Command encoding for: Set Prediction, Configure Food Safe, Reset Food Safe, Set Alarms, Silence Alarms
 - Expiration/TTL handling
 - Web UI: prediction controls, food safety controls, alarm controls
-- Four-step acknowledgement display (pending → received → sent → success/failed)
+- Lease-based acknowledgement display (`pending` → `leased` → `sent` → terminal)
 
 ---
 
@@ -110,8 +110,8 @@ This document outlines the implementation phases for the MeatNet Companion syste
 
 - Log backfill — Read Logs (`0x04`) request/response, gap detection, sequence-based backfill
 - Timestamp reconstruction (anchor to first post-reconnect live packet, derive historical times)
-- `timestampSource` provenance tracking
-- Offline buffer flush on reconnect
+- `timestampSource` + `timestampConfidence` provenance tracking
+- Durable spool replay on reconnect/startup
 - SBC crash recovery (query Convex for active sessions on startup)
 
 ---

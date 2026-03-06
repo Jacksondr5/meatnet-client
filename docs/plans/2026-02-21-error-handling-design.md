@@ -2,69 +2,79 @@
 
 ## Overview
 
-The MeatNet companion system has four primary failure modes. The fundamental resilience guarantee is that **no cook data is ever lost** — the probe stores all log data on-device, so the SBC can always backfill from probe memory after any failure.
+This document describes failure handling for the MeatNet companion runtime.
+
+Authoritative reliability semantics (durability, idempotency, command leasing, and UI states) are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
+
+## Reliability Guarantees (MVP)
+
+- SBC -> Convex delivery is at-least-once with idempotent materialization by key.
+- A record is durable when persisted in Convex or appended to the SBC durable local spool.
+- In-memory buffering alone is not durable.
+- Historical recovery is strong but finite; probe log retention is not infinite.
 
 ## Failure 1: BLE Node Connection Drops
 
 **When it happens:** Node goes out of range, loses power, firmware crash, or BLE interference.
 
-**Detection:** BLE library reports a disconnect event on the GATT connection. Missing heartbeats and a sustained absence of Probe Status messages from the node are early warnings. Default health thresholds: degraded after 15s without heartbeat, offline after 45s.
+**Detection:** GATT disconnect event and sustained missing heartbeat/probe-status traffic.
 
 **Recovery strategy:**
 
-1. **Immediate fallback:** The passive BLE advertising scanner is already running in parallel. Basic temperature data continues flowing to Convex without interruption. The web app sees temperatures but loses predictions, food safety, alarms, and commands.
-2. **Reconnect to same node:** Attempt reconnection with exponential backoff (1s, 2s, 4s, 8s, capped at 30s).
-3. **Reconnect to different node:** If the same node doesn't come back within 60 seconds and other nodes are visible via advertising, attempt connecting to a different node. This handles the case where the primary node dies but another node can still relay probe data.
-4. **Post-reconnect backfill:** Once reconnected, trigger log backfill for all active sessions. The session manager compares its last known sequence number per probe against the probe's current log range and requests the missing records.
+1. **Enter degraded mode:** Keep ingesting advertising data and mark reduced-fidelity records.
+2. **Reconnect to same node:** Exponential backoff (1s, 2s, 4s, 8s, capped at 30s).
+3. **Fail over to different node:** If original node is unavailable and another node is visible.
+4. **Backfill on reconnect:** Request missing ranges by sequence and reconcile idempotently.
+5. **Exit degraded mode:** Only after backfill catch-up window succeeds.
 
-**What the web app sees:** During the disconnected period, temperature readings continue from advertising but with a flag indicating reduced data (no predictions, food safety, or alarms). The network diagnostics page marks gateway status as degraded/offline based on heartbeat freshness. Once reconnected, the gap is backfilled and the UI returns to full fidelity.
+**What the web app sees:** `Degraded` during advertising-only period, then `Syncing` during catch-up, then `Live`.
 
 ## Failure 2: Internet Connectivity Loss
 
-**When it happens:** SBC loses WiFi, router reboots, ISP outage.
+**When it happens:** SBC loses WiFi, router reboots, or ISP outage.
 
-**Detection:** Convex client reports connection failure or mutations start timing out.
+**Detection:** Convex writes fail/time out.
 
 **Recovery strategy:**
 
-1. **Local buffer:** The SBC continues collecting BLE data normally and writes to an in-memory buffer with disk spillover if the buffer exceeds 50MB. All data that would have gone to Convex is queued.
-2. **Command queue frozen:** Pending commands remain in "received" state. New commands from the web app can't reach the SBC.
-3. **Automatic reconnect and flush:** The Convex client handles reconnection automatically. Once connectivity returns, the SBC flushes the buffer to Convex in chronological order using batch writes.
-4. **Ordering guarantee:** Buffered data includes original timestamps from when the BLE data was received, so historical queries remain accurate after a delayed flush.
+1. **Durable spooling:** Continue ingest and append outbound events to local durable spool.
+2. **Controlled command handling:** Do not lease new commands unless status transitions can be durably recorded.
+3. **Replay on reconnect:** Flush spool in chronological order with idempotent upserts.
+4. **Backpressure policy:** Prioritize cook-critical streams over diagnostics when storage pressure rises.
 
-**What the web app sees:** Data stops arriving. The dashboard detects this by checking the latest timestamp for each active session. If no new data arrives within the expected sample period, it shows "SBC offline — data will sync when connection resumes." All data appears retroactively once connectivity returns.
+**What the web app sees:** `Syncing` when backlog replay starts; optional `At Risk` if local durability pressure rises.
 
 ## Failure 3: SBC Process Crash or Reboot
 
-**When it happens:** Unhandled exception, OS update, power loss, manual restart.
-
-**Detection:** The process restarts and needs to recover state.
+**When it happens:** Panic, OS restart, power loss, manual restart.
 
 **Recovery strategy:**
 
-1. **No persistent local state required.** On startup, the SBC queries Convex for all active probe sessions (sessions with no `endTime`). For each, it knows the probe serial number and can look for that probe via BLE through the connected node.
-2. **Re-establish BLE connections:** Scan for nodes, connect to one, re-subscribe to UART notifications.
-3. **Backfill gaps:** For each active session, query the last sequence number in Convex's `temperatureReadings` table. Compare against the probe's current log range. Request any missing logs.
-4. **Resume normal operation:** Start pushing data to Convex.
+1. Recover and replay durable local spool.
+2. Re-establish BLE/node connection.
+3. Compute missing sequence ranges from Convex materialized maxima.
+4. Backfill missing probe logs.
+5. Resume steady-state ingest and command polling.
 
-**What the web app sees:** A gap in data that gets backfilled once the SBC is back. SBC startup time should be fast (seconds).
+**What the web app sees:** temporary gap followed by `Syncing` while replay/backfill completes.
 
 ## Failure 4: Convex Service Degradation
 
-**When it happens:** Convex platform issues, rate limiting, mutation failures.
+**When it happens:** Timeouts, rate limiting, auth failures, or validation failures.
 
-**Detection:** Convex client reports errors on mutations.
+**Detection:** Error-classified Convex mutation/query failures.
 
 **Recovery strategy:**
 
-1. **Buffer locally and retry** — same as internet loss. Convex mutations are idempotent if we use the sequence number as a deduplication key.
-2. **Dynamic backoff on rate limiting** — if Convex rate limits are hit (unlikely with proper batching), increase the batch interval dynamically (2s → 5s → 10s).
+1. **Timeout/rate-limit:** retry with capped exponential backoff and spool growth monitoring.
+2. **Auth/validation:** stop affected pipeline, emit hard error, and avoid infinite retries.
+3. **Recovery:** replay spooled events once service health returns.
 
 ## Summary
 
-| Failure | Data Impact | Recovery Time | Data Loss |
-|---------|------------|---------------|-----------|
-| BLE disconnect | Reduced to advertising-only temps | Seconds to reconnect, then backfill | None (backfill covers gap) |
-| Internet loss | SBC buffers locally | Automatic on reconnect, flush buffer | None (buffered) |
-| SBC crash | No data during downtime | Seconds to restart, then backfill | None (probe stores logs on-device) |
-| Convex degradation | SBC buffers locally | Automatic on recovery | None (buffered + idempotent) |
+| Failure | System Behavior | Recovery | Residual Risk |
+|---------|-----------------|----------|---------------|
+| BLE disconnect | Degraded fidelity via advertising fallback | Reconnect + backfill | Extended disconnect may exceed probe log retention |
+| Internet loss | Durable local spooling | Replay on reconnect | Storage pressure if outage is prolonged |
+| SBC crash | Spool replay + backfill | Automatic on restart | Minimal if spool is healthy |
+| Convex degradation | Retry/spool or fail-fast by error class | Automatic/manual depending on class | Prolonged outage can trigger `At Risk` |

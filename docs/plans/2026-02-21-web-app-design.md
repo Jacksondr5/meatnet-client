@@ -4,6 +4,8 @@
 
 A Next.js application hosted on Vercel that provides live cook monitoring, historical analysis, and device control. All data flows through Convex real-time subscriptions. The app has two primary modes: live monitoring during cooks and historical analysis after.
 
+Reliability state semantics and command outcome meanings are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
+
 ## Page Structure
 
 ```
@@ -60,6 +62,7 @@ The primary real-time monitoring screen. All data arrives via Convex subscriptio
 - Individual T1-T8 sensors (toggleable)
 - Prediction set point as a horizontal target line
 - Estimated time to target as an annotation
+- Reliability badge for data state (`Live`, `Degraded`, `Syncing`, `At Risk`)
 
 **Prediction Panel:**
 
@@ -168,4 +171,4 @@ Device control is only available during active cooks, within the live cook view.
 - Set high/low alarms (per sensor channel)
 - Silence alarms
 
-All control actions write to the `deviceCommands` Convex table and display the four-step acknowledgement progress inline (queued → SBC received → sent to device → device confirmed).
+All control actions write to the `deviceCommands` Convex table and display acknowledgement progress inline (`pending` → `leased` → `sent` → terminal state). Terminal states map to `succeeded`, `failed`, `expired`, or `cancelled` with typed reason codes.

@@ -113,7 +113,7 @@ Test key interactive components with mock Convex data:
 
 - Temperature chart renders correctly with sample time-series data
 - Cook details panel saves metadata on edit
-- Command controls show acknowledgement progress through all four states (pending → received → sent → success/failed)
+- Command controls show acknowledgement progress through lease-based states (pending → leased → sent → terminal)
 - Active session bar updates when sessions start/end
 - Cook history filters produce correct query parameters
 
