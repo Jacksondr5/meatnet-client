@@ -16,6 +16,16 @@ Rationale:
 - Good fit for binary protocol parsing and bitfield-heavy payloads
 - Lower runtime footprint on Raspberry Pi hardware
 
+### SBC Runtime Packaging: OCI Container
+
+The SBC service is packaged and shipped as a container image for deployment consistency across development Linux machines and Raspberry Pi targets.
+
+Rationale:
+
+- Consistent runtime environment across amd64 and arm64
+- Faster iteration loop for shipping/test cycles
+- Simpler reproducibility for dependency and config behavior
+
 ### Debug Interface: Embedded `axum` server in SBC service
 
 The SBC service includes a lightweight debug web server.
@@ -86,3 +96,4 @@ Rationale:
 
 - Historical chart resolution is controlled at ingest using fixed-interval persistence (default 5s, configurable to 1s).
 - Reliability semantics (durability, idempotency, command leasing, degraded states) are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
+- Container runtime details (process manager, update strategy, watchdog integration) are defined by operational readiness design work.

@@ -90,7 +90,12 @@ This document outlines the implementation phases for the MeatNet Companion syste
 - Main application loop wiring: BLE → decode → session manager → Convex sync
 - SBC startup: query Convex for active sessions, reconnect, resume
 - Durable local spooling for outbound Convex events
+- Containerize SBC runtime (OCI image) with persistent mounts for spool/state
+- Multi-arch image build/publish workflow for dev Linux and Raspberry Pi targets
 - **First end-to-end data flow from hardware to cloud**
+
+Container runtime constraints and acceptance criteria:
+- [2026-03-06-container-runtime-constraints.md](../2026-03-06-container-runtime-constraints.md)
 
 ---
 

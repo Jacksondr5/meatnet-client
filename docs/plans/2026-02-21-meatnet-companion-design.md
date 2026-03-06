@@ -62,7 +62,7 @@ MVP scope:
 
 ### Components
 
-**SBC Service (Rust)** — Runs on a Raspberry Pi near the grill. Connects to a MeatNet node as a gateway to probes on the mesh using bluer (BlueZ D-Bus interface). Decodes probe BLE protocol data (advertising packets, Probe Status notifications, UART messages) and network-health messages (heartbeats and topology). Pushes data to Convex via HTTP API. Polls Convex for commands and relays them to probes via the node's UART service. Also passively scans BLE advertising packets for redundancy. Includes an embedded debug web server (axum) for live protocol inspection.
+**SBC Service (Rust, containerized runtime)** — Runs on a Raspberry Pi near the grill. Connects to a MeatNet node as a gateway to probes on the mesh using bluer (BlueZ D-Bus interface). Decodes probe BLE protocol data (advertising packets, Probe Status notifications, UART messages) and network-health messages (heartbeats and topology). Pushes data to Convex via HTTP API. Polls Convex for commands and relays them to probes via the node's UART service. Also passively scans BLE advertising packets for redundancy. Includes an embedded debug web server (axum) for live protocol inspection.
 
 **Convex** — Real-time database and sync layer. Stores all cook data, device state, and pending commands. Handles bidirectional communication between SBC and web app. The web app uses Convex's built-in real-time subscriptions for live data. The SBC pushes data via Convex HTTP API and polls for pending commands.
 
@@ -126,6 +126,7 @@ Bidirectional communication flows through Convex:
 | Web Framework | Next.js |
 | Web Hosting | Vercel |
 | SBC Hardware | Raspberry Pi |
+| SBC Packaging | OCI container image (multi-arch) |
 | Repo Structure | Monorepo with workspace dirs |
 
 Reliability guarantees and degraded-mode behavior are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
