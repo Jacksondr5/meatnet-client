@@ -5,3 +5,9 @@ This repository is for the MeatNet client initiative and currently contains plan
 Primary documentation locations:
 - `docs/`: project plans, design notes, and architecture/design docs.
 - `external-docs/`: vendored/linked external specifications from Combustion, including BLE interface docs for Probe, Node, Gauge, and Engine devices.
+
+If `external-docs/` is missing, initialize/update it with:
+
+```bash
+./sync-docs.sh
+```
