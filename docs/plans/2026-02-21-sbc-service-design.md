@@ -6,6 +6,8 @@ The SBC service is a Rust process that runs on a Raspberry Pi near the grill. It
 
 Runtime reliability and recovery semantics are defined in [2026-03-06-reliability-contract-design.md](./2026-03-06-reliability-contract-design.md).
 
+Canonical device identity is exact Combustion `productType + serialNumber` from protocol data. The serial number must be normalized by advertisement family or GATT Device Information data. BLE addresses and library-specific peripheral handles are transport-only and must not be used as durable identifiers.
+
 ## Internal Architecture
 
 ```
@@ -27,7 +29,8 @@ Runtime reliability and recovery semantics are defined in [2026-03-06-reliabilit
 │         │                   │                     │             │
 │  ┌──────┴───────────────────┴─────────────────────┴──────┐      │
 │  │                    Packet Decoder                      │      │
-│  │  • Advertising packet parser                          │      │
+│  │  • Advertisement identity parsers                     │      │
+│  │  • Probe advertising parser                           │      │
 │  │  • Probe Status parser                                │      │
 │  │  • Probe log/command response parser                  │      │
 │  │  • Temperature conversion (raw → °C/°F)               │      │
@@ -54,11 +57,17 @@ Runtime reliability and recovery semantics are defined in [2026-03-06-reliabilit
 
 ### BLE Scanner (passive)
 
-Continuously scans for Combustion Inc advertising packets (vendor ID `0x09C7`). For MVP, parses probe-format manufacturer data (temperature/mode/battery) and ignores non-probe payloads. Runs independently of the node connection. Serves as a fallback data source and provides advertising-only data (like RSSI from the SBC's perspective) that isn't available through the node.
+Continuously scans for Combustion Inc advertising packets (vendor ID `0x09C7`). The scanner must classify advertisements by family and extract canonical identity accordingly:
+
+- direct probe advertisements -> exact probe `productType + serialNumber`,
+- node repeated-probe advertisements -> exact probe `productType + serialNumber` for the repeated probe,
+- node self-advertisements -> exact node-family `productType + serialNumber`.
+
+The scanner emits raw manufacturer data for downstream parsing, keys discovered devices by exact Combustion `productType + serialNumber`, and treats any BLE address as an ephemeral transport handle only. It runs independently of the node connection, serves as a fallback data source, and provides advertising-only data such as RSSI from the SBC's perspective.
 
 ### Node Gateway (connected)
 
-Establishes and maintains a BLE connection to one MeatNet node. Subscribes to the UART TX characteristic for notifications. Receives Probe Status (`0x45`), Heartbeat (`0x49`), topology responses (`0x42`/`0x43`), and relevant probe command responses. Handles reconnection with exponential backoff if the connection drops.
+Establishes and maintains a BLE connection to one MeatNet node. Subscribes to the UART TX characteristic for notifications. Receives Probe Status (`0x45`), Heartbeat (`0x49`), topology responses (`0x42`/`0x43`), and relevant probe command responses. On connect, reads Device Information characteristics needed to confirm or finalize node-family canonical identity, including `Serial Number String`. Handles reconnection with exponential backoff if the connection drops.
 
 ### UART Codec
 

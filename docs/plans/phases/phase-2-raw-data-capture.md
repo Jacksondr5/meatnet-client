@@ -166,7 +166,7 @@ pub enum BleEvent {
     #[serde(rename = "advertising")]
     Advertising {
         timestamp_ms: u64,
-        address: String,
+        peripheral_handle: String,
         product_type: String,
         serial_number: String,
         rssi: Option<i16>,
@@ -189,17 +189,17 @@ pub enum BleEvent {
 impl BleEvent {
     /// Create an Advertising event from scanner data.
     pub fn advertising(
-        address: bluer::Address,
+        peripheral_handle: bluer::Address,
         product_type: ProductType,
-        serial_number: u32,
+        serial_number: String,
         rssi: Option<i16>,
         raw_bytes: &[u8],
     ) -> Self {
         BleEvent::Advertising {
             timestamp_ms: now_ms(),
-            address: address.to_string(),
+            peripheral_handle: peripheral_handle.to_string(),
             product_type: format!("{:?}", product_type),
-            serial_number: format!("{:08X}", serial_number),
+            serial_number,
             rssi,
             raw_bytes_hex: bytes_to_hex(raw_bytes),
         }
@@ -318,7 +318,7 @@ mod tests {
     fn advertising_event_serializes_with_source_tag() {
         let json = serde_json::to_value(BleEvent::Advertising {
             timestamp_ms: 1000,
-            address: "AA:BB:CC:DD:EE:FF".to_string(),
+            peripheral_handle: "AA:BB:CC:DD:EE:FF".to_string(),
             product_type: "PredictiveProbe".to_string(),
             serial_number: "10005205".to_string(),
             rssi: Some(-65),
@@ -402,11 +402,38 @@ use crate::types::ProductType;
 /// Information about a discovered Combustion device.
 #[derive(Debug)]
 pub struct DiscoveredDevice {
-    pub address: Address,
+    pub peripheral_handle: Address,
     pub product_type: ProductType,
-    pub serial_number: u32,
+    pub serial_number: String,
     pub rssi: Option<i16>,
     pub raw_manufacturer_data: Vec<u8>,
+}
+
+fn parse_normalized_serial(product_type: ProductType, data: &[u8]) -> Option<String> {
+    match product_type {
+        ProductType::PredictiveProbe => {
+            if data.len() < 5 {
+                return None;
+            }
+            let serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+            Some(format!("{serial:08X}"))
+        }
+        ProductType::MeatNetRepeater
+        | ProductType::GiantGrillGauge
+        | ProductType::Display
+        | ProductType::Booster => {
+            if data.len() >= 11 {
+                let serial = std::str::from_utf8(&data[1..11]).ok()?;
+                Some(serial.trim_end_matches('\0').to_string())
+            } else if data.len() >= 5 {
+                let probe_serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                Some(format!("{probe_serial:08X}"))
+            } else {
+                None
+            }
+        }
+        ProductType::Unknown => None,
+    }
 }
 
 /// Parse a discovered bluer Device into a DiscoveredDevice if it's a Combustion device.
@@ -415,21 +442,20 @@ async fn parse_combustion_device(device: &Device) -> Option<DiscoveredDevice> {
     let manufacturer_data = device.manufacturer_data().await.ok()??;
     let data = manufacturer_data.get(&COMBUSTION_VENDOR_ID)?;
 
-    if data.len() < 22 {
+    if data.is_empty() {
         log::warn!(
-            "Combustion device {} has short manufacturer data ({} bytes, expected >= 22)",
+            "Combustion device {} has empty manufacturer data",
             device.address(),
-            data.len()
         );
         return None;
     }
 
     let product_type = ProductType::from_byte(data[0]);
-    let serial_number = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    let serial_number = parse_normalized_serial(product_type, data)?;
     let rssi = device.rssi().await.ok()?;
 
     Some(DiscoveredDevice {
-        address: device.address(),
+        peripheral_handle: device.address(),
         product_type,
         serial_number,
         rssi,
@@ -440,6 +466,8 @@ async fn parse_combustion_device(device: &Device) -> Option<DiscoveredDevice> {
 /// Run the passive BLE advertising scanner.
 /// Discovers Combustion devices, emits BleEvent::Advertising through the event bus,
 /// and calls `on_node_found` when a new node is discovered.
+/// The BLE handle is transport-only; canonical identity remains
+/// exact Combustion `product_type + serial_number`.
 ///
 /// This function runs forever (until the adapter stream ends or an error occurs).
 pub async fn run_scanner(
@@ -464,15 +492,15 @@ pub async fn run_scanner(
 
                     // Emit event (ignore send errors — no subscribers is OK)
                     let _ = event_tx.send(BleEvent::advertising(
-                        discovered.address,
+                        discovered.peripheral_handle,
                         discovered.product_type,
-                        discovered.serial_number,
+                        discovered.serial_number.clone(),
                         discovered.rssi,
                         &discovered.raw_manufacturer_data,
                     ));
 
                     log::info!(
-                        "Combustion device: addr={} type={:?} serial={:08X} rssi={:?}",
+                        "Combustion device: handle={} key={:?}:{} rssi={:?}",
                         addr,
                         discovered.product_type,
                         discovered.serial_number,
@@ -486,7 +514,11 @@ pub async fn run_scanner(
             }
             AdapterEvent::DeviceRemoved(addr) => {
                 if let Some(product_type) = seen_devices.remove(&addr) {
-                    log::debug!("Device removed: addr={} type={:?}", addr, product_type);
+                    log::debug!(
+                        "Device removed: handle={} type={:?}",
+                        addr,
+                        product_type
+                    );
                 }
             }
             _ => {}
@@ -808,7 +840,7 @@ pub struct CaptureEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
+    pub peripheral_handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_number: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -822,7 +854,7 @@ impl From<&BleEvent> for CaptureEntry {
         match event {
             BleEvent::Advertising {
                 timestamp_ms,
-                address,
+                peripheral_handle,
                 product_type,
                 serial_number,
                 raw_bytes_hex,
@@ -832,7 +864,7 @@ impl From<&BleEvent> for CaptureEntry {
                 source: "advertising".to_string(),
                 raw_bytes: raw_bytes_hex.clone(),
                 message_type: None,
-                address: Some(address.clone()),
+                peripheral_handle: Some(peripheral_handle.clone()),
                 serial_number: Some(serial_number.clone()),
                 product_type: Some(product_type.clone()),
                 note: None,
@@ -847,7 +879,7 @@ impl From<&BleEvent> for CaptureEntry {
                 source: "uart_tx".to_string(),
                 raw_bytes: raw_bytes_hex.clone(),
                 message_type: message_type.clone(),
-                address: None,
+                peripheral_handle: None,
                 serial_number: None,
                 product_type: None,
                 note: None,
@@ -948,7 +980,7 @@ mod tests {
     fn capture_entry_from_advertising_event() {
         let event = BleEvent::Advertising {
             timestamp_ms: 1000,
-            address: "AA:BB:CC:DD:EE:FF".to_string(),
+            peripheral_handle: "AA:BB:CC:DD:EE:FF".to_string(),
             product_type: "PredictiveProbe".to_string(),
             serial_number: "10005205".to_string(),
             rssi: Some(-65),
@@ -959,6 +991,10 @@ mod tests {
         assert_eq!(entry.timestamp, 1000);
         assert_eq!(entry.raw_bytes, "0105520010cafe");
         assert_eq!(entry.serial_number, Some("10005205".to_string()));
+        assert_eq!(
+            entry.peripheral_handle,
+            Some("AA:BB:CC:DD:EE:FF".to_string())
+        );
         assert!(entry.message_type.is_none());
     }
 
@@ -975,7 +1011,7 @@ mod tests {
         assert_eq!(entry.source, "uart_tx");
         assert_eq!(entry.timestamp, 2000);
         assert_eq!(entry.message_type, Some("0x45".to_string()));
-        assert!(entry.address.is_none());
+        assert!(entry.peripheral_handle.is_none());
     }
 
     #[test]
@@ -983,13 +1019,13 @@ mod tests {
         let file = CaptureFile {
             scenario: "test-scenario".to_string(),
             description: "A test".to_string(),
-            devices: vec!["probe:AABBCCDD".to_string()],
+            devices: vec!["predictive-probe:AABBCCDD".to_string()],
             captures: vec![CaptureEntry {
                 timestamp: 1000,
                 source: "advertising".to_string(),
                 raw_bytes: "cafe01".to_string(),
                 message_type: None,
-                address: Some("AA:BB:CC:DD:EE:FF".to_string()),
+                peripheral_handle: Some("AA:BB:CC:DD:EE:FF".to_string()),
                 serial_number: Some("AABBCCDD".to_string()),
                 product_type: Some("PredictiveProbe".to_string()),
                 note: None,
@@ -1010,13 +1046,13 @@ mod tests {
             source: "uart_tx".to_string(),
             raw_bytes: "cafe".to_string(),
             message_type: Some("0x45".to_string()),
-            address: None,
+            peripheral_handle: None,
             serial_number: None,
             product_type: None,
             note: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("address"));
+        assert!(!json.contains("peripheralHandle"));
         assert!(!json.contains("serialNumber"));
         assert!(!json.contains("note"));
         assert!(json.contains("messageType"));
@@ -1037,12 +1073,14 @@ mod tests {
             source: "uart_tx".to_string(),
             raw_bytes: "cafe0045".to_string(),
             message_type: Some("0x45".to_string()),
-            address: None,
+            peripheral_handle: None,
             serial_number: None,
             product_type: None,
             note: None,
         });
-        writer.devices_seen.push("probe:AABBCCDD".to_string());
+        writer
+            .devices_seen
+            .push("predictive-probe:AABBCCDD".to_string());
 
         let path = writer.write_to_file().unwrap();
         assert!(path.exists());
@@ -1982,3 +2020,9 @@ git commit -m "feat: captured BLE test fixtures for Phase 3 protocol decoding"
    cargo run -- --help
    ```
    Shows all options with correct defaults.
+Fixture identity rule:
+
+- Use exact Combustion `product_type + serial_number` as the canonical device key in fixture metadata and grouping.
+- Normalize probe-family serials as uppercase 8-character hex and node-family serials as protocol serial strings.
+- If a BLE transport handle is captured for debugging, store it as `peripheral_handle` only.
+- Never treat captured addresses or peripheral IDs as stable device identity.

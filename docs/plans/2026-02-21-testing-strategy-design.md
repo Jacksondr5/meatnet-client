@@ -12,7 +12,7 @@ A lightweight script that records raw BLE bytes from real Combustion Inc devices
 
 ### What to Capture
 
-- **Raw advertising packets** — Full 24-byte probe manufacturer data (including Instant Read and normal modes)
+- **Raw advertising packets** — Direct probe advertisements, node repeated-probe advertisements, and node self-advertisements with full manufacturer data bytes
 - **UART messages** — Raw bytes from the TX characteristic for probe-focused messages: Probe Status (`0x45`), Heartbeat (`0x49`), topology messages (`0x42`/`0x43`), log reads (`0x04`), and probe command responses
 - **Scenario sequences** — Ordered captures of specific real-world events
 
@@ -41,7 +41,7 @@ Each capture is a JSON file with timestamped raw byte arrays and metadata:
 {
   "scenario": "probe-prediction-lifecycle",
   "description": "Probe #1 set to 95C removal, full cook until prediction done",
-  "devices": ["probe:AABBCCDD"],
+  "devices": ["predictive-probe:AABBCCDD"],
   "captures": [
     {
       "timestamp": 1708531200000,
@@ -168,7 +168,7 @@ Side-by-side view of raw bytes and parsed results for every BLE packet:
 │                                     │ ETA: 2847 seconds               │
 │                                     │ Food Safe: Not Safe             │
 ├─────────────────────────────────────┼──────────────────────────────────┤
-│ Source: Advertising (Probe)         │ Serial: AABBCCDD                │
+│ Source: Advertising (PredictiveProbe) │ Serial: AABBCCDD              │
 │ c7 09 01 aa bb cc dd 8f 2a ...      │ T1: 72.3°C                      │
 │ Timestamp: 14:32:01.312             │ Mode: Normal  ID: 1             │
 │                                     │ Battery: OK                     │

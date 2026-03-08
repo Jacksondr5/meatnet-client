@@ -8,6 +8,8 @@ Reliability semantics (durability, idempotency, lease-based command execution) a
 
 Access model for MVP is single-user household with explicit data ownership boundaries.
 
+Canonical device identity is exact Combustion `productType + serialNumber` from protocol data. `serialNumber` is stored as a normalized string derived from the correct advertisement family or confirmed from GATT Device Information data. BLE addresses, MAC addresses, and library peripheral handles are transport diagnostics only and must not be used as durable identity keys.
+
 ## Tables
 
 ### `devices`
@@ -16,9 +18,9 @@ Registry of known Combustion devices used by MVP.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `serialNumber` | string | Unique device identifier (4-byte hex for probes, 10-byte for nodes) |
-| `productType` | enum | `probe`, `node` |
-| `nodeType` | enum? | `repeater`, `display`, `booster` (for node devices) |
+| `serialNumber` | string | Normalized Combustion device serial string |
+| `productType` | enum | Exact Combustion product type such as `predictive-probe`, `meatnet-repeater`, `giant-grill-gauge`, `display`, or `booster`; together with `serialNumber` forms the canonical device key |
+| `nodeType` | enum? | Optional node-family classification for UI grouping or diagnostics when `productType` is a node-family device |
 | `ownerId` | string | Household/user owner boundary for all device-scoped queries/mutations |
 | `name` | string? | User-assigned friendly name (e.g., "Brisket probe") |
 | `firmwareRevision` | string? | Last known firmware version |
@@ -94,7 +96,8 @@ Command queue with full acknowledgement tracking. Commands flow from the web UI 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `deviceSerialNumber` | string | Target device serial number |
+| `deviceSerialNumber` | string | Target device normalized Combustion serial string |
+| `deviceProductType` | enum | Target device exact Combustion product type; together with `deviceSerialNumber` identifies the device |
 | `ownerId` | string | Household/user owner boundary used for command authorization |
 | `commandType` | enum | `setPrediction`, `configFoodSafe`, `resetFoodSafe`, `setAlarms`, `silenceAlarms` |
 | `payload` | object | Command-specific parameters |
@@ -121,9 +124,9 @@ Mesh snapshots from node list + topology responses. Used for network diagnostics
 | Field | Type | Description |
 |-------|------|-------------|
 | `timestamp` | number | When this topology snapshot was captured |
-| `gatewaySerialNumber` | string | Node serial number of the connected gateway |
-| `nodeSerialNumber` | string | Node being described in this snapshot |
-| `nodeType` | enum | `repeater`, `display`, `booster`, `unknown` |
+| `gatewaySerialNumber` | string | Connected gateway normalized node-family serial string |
+| `nodeSerialNumber` | string | Normalized node-family serial string being described in this snapshot |
+| `nodeType` | enum | Node-family classification derived from exact Combustion product type |
 | `inboundConnections` | object[] | Array of `{ serialNumber, productType, rssi }` |
 | `outboundConnections` | object[] | Array of `{ serialNumber, productType, rssi }` |
 | `health` | enum | `healthy`, `degraded`, `offline` |
@@ -142,8 +145,8 @@ Raw heartbeat stream from node heartbeat messages for freshness and link quality
 | Field | Type | Description |
 |-------|------|-------------|
 | `timestamp` | number | When heartbeat was received by SBC |
-| `nodeSerialNumber` | string | Reporting node |
-| `macAddress` | string | Node MAC address |
+| `nodeSerialNumber` | string | Reporting node normalized serial string |
+| `macAddress` | string | Node MAC address for diagnostics only; not canonical device identity |
 | `hopCount` | number | Hops this message has traveled |
 | `direction` | enum | `inbound`, `outbound` |
 | `connections` | object[] | Array of `{ serialNumber, productType, rssi, attributes }` |
@@ -206,7 +209,7 @@ Command: Set prediction to 95C on Probe #1
 
 ### Uniqueness Constraints (logical)
 
-- `devices`: unique on `(ownerId, serialNumber)`.
+- `devices`: unique on `(ownerId, productType, serialNumber)`, where `productType` is the exact Combustion product type and `serialNumber` is the normalized Combustion serial string.
 - `cookSessions`: unique on `(deviceId, sessionId)`.
 - `temperatureReadings`: unique on `(sessionId, sequenceNumber)` for idempotent replay.
 - `predictionSnapshots`: unique on `(sessionId, transitionOrdinal)`.
@@ -216,7 +219,7 @@ Command: Set prediction to 95C on Probe #1
 ### Query Indexes (recommended)
 
 - `devices`
-  - `by_owner_serial` on `(ownerId, serialNumber)`
+  - `by_owner_device_key` on `(ownerId, productType, serialNumber)`
   - `by_owner_lastSeen` on `(ownerId, lastSeen)`
 - `cookSessions`
   - `by_owner_active` on `(ownerId, endTime, startTime)` for active-cook dashboard and session bar
@@ -234,7 +237,7 @@ Command: Set prediction to 95C on Probe #1
   - `by_session_timestamp` on `(sessionId, timestamp)`
 - `deviceCommands`
   - `by_owner_status_created` on `(ownerId, status, createdAt)` for command inbox/UX
-  - `by_device_status_created` on `(deviceSerialNumber, status, createdAt)` for device-scoped command history
+  - `by_device_status_created` on `(deviceProductType, deviceSerialNumber, status, createdAt)` for device-scoped command history
   - `by_status_expires` on `(status, expiresAt)` for expiry sweeps
 - `networkTopology`
   - `by_gateway_timestamp` on `(gatewaySerialNumber, timestamp)`

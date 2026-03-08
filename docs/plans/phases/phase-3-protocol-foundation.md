@@ -1,6 +1,6 @@
 # Phase 3: Protocol Foundation Implementation Plan
 
-**Goal:** Decode every field in the Combustion BLE protocol — advertising packets, Probe Status messages, log responses, and UART frames — using pure functions tested against spec-derived data and Phase 2 captured fixtures.
+**Goal:** Decode every field in the Combustion BLE protocol that we need for discovery and runtime operation — advertisement identity payloads, probe-format advertising data, Probe Status messages, log responses, and UART frames — using pure functions tested against spec-derived data and Phase 2 captured fixtures.
 
 **Architecture:** A `protocol/` module containing pure parsing functions with zero BLE or I/O dependencies. Every parser takes a byte slice and returns a typed Rust struct. All code is TDD: write test with known bytes → verify fail → implement parser → verify pass. The debug server is enhanced to show parsed results alongside raw bytes.
 
@@ -40,7 +40,7 @@ sbc-service/src/
 │   ├── prediction.rs       # Prediction status + prediction log
 │   ├── food_safe.rs        # Food safe data + status
 │   ├── alarm.rs            # Alarm status arrays
-│   ├── advertising.rs      # Full 24-byte advertising packet
+│   ├── advertising.rs      # Advertisement identity + probe advertising parsers
 │   ├── crc.rs              # CRC-16-CCITT
 │   ├── uart.rs             # UART frame parser + serializer
 │   └── probe_status.rs     # Probe Status (0x45) + Read Logs (0x04)
@@ -1186,7 +1186,7 @@ git commit -m "feat: alarm status parser"
 
 ---
 
-## Task 6: Advertising Packet Parser
+## Task 6: Advertisement Identity And Probe Advertising Parsers
 
 **Files:**
 
@@ -1194,15 +1194,22 @@ git commit -m "feat: alarm status parser"
 - Create: `sbc-service/src/protocol/advertising.rs`
 - Modify: `sbc-service/src/protocol/mod.rs`
 
-**Step 1: Add AdvertisingData type**
+**Step 1: Add advertisement types**
 
 ```rust
 // Append to types.rs
 
-/// Parsed advertising packet manufacturer data (22 bytes after vendor ID).
+/// Canonical identity extracted from an advertisement.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct AdvertisingData {
-    pub serial_number: u32,
+pub struct AdvertisementIdentity {
+    pub product_type: ProductType,
+    pub serial_number: String,
+}
+
+/// Parsed probe-format advertising payload.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProbeAdvertisingData {
+    pub probe_serial_number: u32,
     pub temperatures: ProbeTemperatures,
     pub mode_id: ModeId,
     pub battery_virtual: BatteryVirtualSensors,
@@ -1219,11 +1226,46 @@ use super::mode_id::{parse_battery_virtual_sensors, parse_mode_id, parse_overhea
 use super::temperature::parse_temperatures;
 use super::types::*;
 
-/// Parse the 22-byte manufacturer specific data (after the 2-byte vendor ID
-/// has been stripped and the 1-byte product type has been read).
+/// Parse canonical identity from a Combustion advertisement payload.
+///
+/// `data` is the manufacturer data after the 2-byte company ID.
+pub fn parse_advertisement_identity(data: &[u8]) -> AdvertisementIdentity {
+    assert!(!data.is_empty(), "advertisement data must not be empty");
+
+    let product_type = ProductType::from_byte(data[0]);
+    let serial_number = match product_type {
+        ProductType::PredictiveProbe => {
+            assert!(data.len() >= 5, "probe advertisement must include 4-byte serial");
+            let serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+            format!("{serial:08X}")
+        }
+        ProductType::MeatNetRepeater
+        | ProductType::GiantGrillGauge
+        | ProductType::Display
+        | ProductType::Booster => {
+            assert!(
+                data.len() >= 11,
+                "node self-advertisement must include 10-byte serial"
+            );
+            std::str::from_utf8(&data[1..11])
+                .expect("node serial must be valid UTF-8")
+                .trim_end_matches('\0')
+                .to_string()
+        }
+        ProductType::Unknown => String::new(),
+    };
+
+    AdvertisementIdentity {
+        product_type,
+        serial_number,
+    }
+}
+
+/// Parse the probe-format manufacturer specific data used by direct probe
+/// advertisements and node repeated-probe advertisements.
 ///
 /// Layout:
-///   Bytes 0-3: serial number (u32 LE)
+///   Bytes 0-3: probe serial number (u32 LE)
 ///   Bytes 4-16: raw temperature data (13 bytes)
 ///   Byte 17: mode/ID
 ///   Byte 18: battery status and virtual sensors
@@ -1232,21 +1274,21 @@ use super::types::*;
 ///
 /// Note: The input is the manufacturer data AFTER the product type byte,
 /// so byte 0 here = byte 1 of the full manufacturer data (byte 0 was product type).
-pub fn parse_advertising_data(data: &[u8]) -> AdvertisingData {
+pub fn parse_probe_advertising_data(data: &[u8]) -> ProbeAdvertisingData {
     assert!(
         data.len() >= 21,
-        "advertising data must be at least 21 bytes (after product type)"
+        "probe advertising data must be at least 21 bytes (after product type)"
     );
 
-    let serial_number = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let probe_serial_number = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let temperatures = parse_temperatures(&data[4..17]);
     let mode_id = parse_mode_id(data[17]);
     let battery_virtual = parse_battery_virtual_sensors(data[18]);
     let network_info = data[19];
     let overheating = parse_overheating_sensors(data[20]);
 
-    AdvertisingData {
-        serial_number,
+    ProbeAdvertisingData {
+        probe_serial_number,
         temperatures,
         mode_id,
         battery_virtual,
@@ -1260,9 +1302,9 @@ mod tests {
     use super::*;
     use crate::protocol::bits::pack_bits;
 
-    fn build_advertising_data(serial: u32, temp_celsius: f64, mode: u8) -> Vec<u8> {
+    fn build_probe_advertising_data(serial: u32, temp_celsius: f64, mode: u8) -> Vec<u8> {
         let mut data = vec![0u8; 21];
-        // Serial number (LE)
+        // Probe serial number (LE)
         data[0..4].copy_from_slice(&serial.to_le_bytes());
         // Temperatures (all same value)
         for i in 0..8 {
@@ -1281,27 +1323,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_advertising_serial_number() {
-        let data = build_advertising_data(0x10005205, 25.0, 0x00);
-        let result = parse_advertising_data(&data);
-        assert_eq!(result.serial_number, 0x10005205);
+    fn parse_probe_advertising_serial_number() {
+        let data = build_probe_advertising_data(0x10005205, 25.0, 0x00);
+        let result = parse_probe_advertising_data(&data);
+        assert_eq!(result.probe_serial_number, 0x10005205);
     }
 
     #[test]
-    fn parse_advertising_temperatures() {
-        let data = build_advertising_data(0x01, 72.5, 0x00);
-        let result = parse_advertising_data(&data);
+    fn parse_probe_advertising_temperatures() {
+        let data = build_probe_advertising_data(0x01, 72.5, 0x00);
+        let result = parse_probe_advertising_data(&data);
         for t in &result.temperatures.values {
             assert!((*t - 72.5).abs() < 0.05);
         }
     }
 
     #[test]
-    fn parse_advertising_instant_read() {
+    fn parse_probe_advertising_instant_read() {
         // Mode=1 (InstantRead)
-        let data = build_advertising_data(0x01, 25.0, 0b000_000_01);
-        let result = parse_advertising_data(&data);
+        let data = build_probe_advertising_data(0x01, 25.0, 0b000_000_01);
+        let result = parse_probe_advertising_data(&data);
         assert_eq!(result.mode_id.mode, ProbeMode::InstantRead);
+    }
+
+    #[test]
+    fn parse_probe_advertisement_identity() {
+        let identity = parse_advertisement_identity(&[0x01, 0xDD, 0xCC, 0xBB, 0xAA]);
+        assert_eq!(identity.product_type, ProductType::PredictiveProbe);
+        assert_eq!(identity.serial_number, "AABBCCDD");
+    }
+
+    #[test]
+    fn parse_node_advertisement_identity() {
+        let identity = parse_advertisement_identity(b"\x05CR100010EB");
+        assert_eq!(identity.product_type, ProductType::Booster);
+        assert_eq!(identity.serial_number, "CR100010EB");
     }
 }
 ```
@@ -1310,7 +1366,7 @@ mod tests {
 
 ```bash
 git add sbc-service/src/protocol/
-git commit -m "feat: advertising packet parser"
+git commit -m "feat: add advertisement identity and probe advertising parsers"
 ```
 
 ---
@@ -1672,7 +1728,7 @@ git commit -m "feat: CRC-16-CCITT and UART frame parser with serializer"
 /// Fully parsed Probe Status from a node UART 0x45 message.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProbeStatusData {
-    pub serial_number: u32,
+    pub probe_serial_number: u32,
     pub log_min_sequence: u32,
     pub log_max_sequence: u32,
     pub temperatures: ProbeTemperatures,
@@ -1690,7 +1746,7 @@ pub struct ProbeStatusData {
 /// A parsed Read Logs (0x04) response entry.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogEntry {
-    pub serial_number: u32,
+    pub probe_serial_number: u32,
     pub sequence_number: u32,
     pub temperatures: ProbeTemperatures,
     pub prediction_log: PredictionLog,
@@ -1732,12 +1788,13 @@ pub fn parse_probe_status(payload: &[u8]) -> ProbeStatusData {
         payload.len()
     );
 
-    let serial_number = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let probe_serial_number =
+        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let log_min = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
     let log_max = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
 
     ProbeStatusData {
-        serial_number,
+        probe_serial_number,
         log_min_sequence: log_min,
         log_max_sequence: log_max,
         temperatures: parse_temperatures(&payload[12..25]),
@@ -1769,7 +1826,7 @@ pub fn parse_log_entry(payload: &[u8]) -> LogEntry {
     );
 
     LogEntry {
-        serial_number: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+        probe_serial_number: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
         sequence_number: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
         temperatures: parse_temperatures(&payload[8..21]),
         prediction_log: parse_prediction_log(&payload[21..28]),
@@ -1794,7 +1851,7 @@ mod tests {
     fn parse_probe_status_serial_and_log_range() {
         let payload = build_probe_status_payload(0xAABBCCDD, 100, 500);
         let result = parse_probe_status(&payload);
-        assert_eq!(result.serial_number, 0xAABBCCDD);
+        assert_eq!(result.probe_serial_number, 0xAABBCCDD);
         assert_eq!(result.log_min_sequence, 100);
         assert_eq!(result.log_max_sequence, 500);
     }
@@ -1919,7 +1976,7 @@ Similarly, add a `parsed` field to `BleEvent::Advertising` and populate it:
     #[serde(rename = "advertising")]
     Advertising {
         timestamp_ms: u64,
-        address: String,
+        peripheral_handle: String,
         product_type: String,
         serial_number: String,
         rssi: Option<i16>,

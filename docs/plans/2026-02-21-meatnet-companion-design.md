@@ -76,6 +76,16 @@ MVP scope:
 - Credential rotation/revocation is explicit and manual (reprovision/reset/suspected leak).
 - Debug server is loopback-only by default; LAN access is opt-in and token-gated.
 
+### Canonical Device Identity
+
+- Application-level device identity is the exact Combustion `productType + serialNumber`.
+- `productType` means the protocol product type reported by the device, such as `predictive-probe`, `display`, or `booster`.
+- `serialNumber` is a normalized Combustion serial string:
+  - probe-family serials use the 4-byte little-endian probe serial rendered as uppercase 8-character hex,
+  - node-family serials use the 10-byte node serial string exposed by node self-advertisements and the GATT Device Information service.
+- BLE addresses, CoreBluetooth peripheral IDs, and other transport-level handles are ephemeral connection details only.
+- All persisted device references, routes, and command targets should use the Combustion device key rather than the transport handle.
+
 ### BLE Strategy: Node Gateway + Passive Scan
 
 The SBC connects to one MeatNet node (e.g., repeater or display) as its gateway to the probe network. This mirrors how the official Combustion app works for probe data.
@@ -108,7 +118,7 @@ Probe-focused capture:
 
 Bidirectional communication flows through Convex:
 
-1. Web UI writes a command record to a Convex commands table (e.g., "set prediction to 203F on probe serial X")
+1. Web UI writes a command record to a Convex commands table keyed to the target device by exact Combustion `productType + serialNumber` (for example, "set prediction on predictive-probe `AABBCCDD`")
 2. SBC polls the commands table via HTTP and leases pending commands for execution
 3. SBC encodes the command per the UART protocol and sends it to the device via the node gateway
 4. SBC writes the command terminal outcome (`succeeded`, `failed`, `expired`, or `cancelled`) back to Convex
@@ -162,7 +172,8 @@ Reliability guarantees and degraded-mode behavior are defined in [2026-03-06-rel
 │         │                   │                     │             │
 │  ┌──────┴───────────────────┴─────────────────────┴──────┐      │
 │  │                    Packet Decoder                      │      │
-│  │  • Advertising packet parser                          │      │
+│  │  • Advertisement identity parsers                     │      │
+│  │  • Probe advertising parser                           │      │
 │  │  • Probe Status parser                                │      │
 │  │  • Probe log/command response parser                  │      │
 │  │  • Temperature conversion (raw → °C/°F)               │      │
@@ -187,7 +198,13 @@ Reliability guarantees and degraded-mode behavior are defined in [2026-03-06-rel
 
 ### BLE Scanner (passive)
 
-Continuously scans for Combustion Inc advertising packets (vendor ID `0x09C7`). For MVP, parses probe-format manufacturer data (temperature/mode/battery) and ignores non-probe payloads. Runs independently of the node connection. Serves as a fallback data source and provides advertising-only data (like RSSI from the SBC's perspective) that isn't available through the node.
+Continuously scans for Combustion Inc advertising packets (vendor ID `0x09C7`). The scanner must classify advertisements by family and product type:
+
+- direct probe advertisements, carrying probe identity and probe advertising data,
+- node repeated-probe advertisements, carrying probe identity and repeated probe advertising data,
+- node self-advertisements, carrying node-family identity and product-specific node payload fields.
+
+The scanner builds canonical device keys from exact Combustion `productType + serialNumber`, treats BLE handles as ephemeral transport data, and emits raw manufacturer bytes for downstream parsers. It runs independently of the node connection, serves as a fallback data source, and provides advertising-only data such as RSSI from the SBC's perspective.
 
 ### Node Gateway (connected)
 

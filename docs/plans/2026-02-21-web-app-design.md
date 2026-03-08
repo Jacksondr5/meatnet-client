@@ -14,9 +14,11 @@ Reliability state semantics and command outcome meanings are defined in [2026-03
 /history                 → Cook journal with search/filter
 /compare                 → Side-by-side cook comparison
 /devices                 → Device registry (read-only info)
-/devices/[serialNumber]  → Device detail (info, firmware, link to active session)
+/devices/[productType]/[serialNumber]  → Device detail (info, firmware, link to active session)
 /network                 → MeatNet mesh health and topology diagnostics
 ```
+
+Canonical device routing uses exact Combustion `productType + serialNumber`. `serialNumber` is the normalized Combustion serial string. BLE addresses and peripheral handles must never appear in URLs.
 
 ## Multi-Probe Navigation
 
@@ -119,7 +121,7 @@ Shows a comparison table with key metrics side by side: total cook time, time to
 
 **Device list** — All known devices with last seen time, battery status, firmware version.
 
-**Device detail page** — Read-only device information: serial number, product type, firmware/hardware revision, last seen. Links to active cook session if one exists for this device. No device controls on this page — all control happens in the live cook view.
+**Device detail page** — Read-only device information: serial number, exact product type, firmware/hardware revision, last seen. The route key is exact Combustion `productType + serialNumber`. Links to active cook session if one exists for this device. No device controls on this page — all control happens in the live cook view.
 
 ### Network Diagnostics (`/network`)
 

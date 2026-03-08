@@ -6,15 +6,37 @@ This document captures the current technology choices for the MeatNet companion 
 
 ## Current Decisions
 
-### SBC Service: Rust with `bluer`
+### SBC Service BLE Library: pending validation
 
-The SBC runtime is a Rust service using `bluer` for BLE communication over BlueZ D-Bus.
+The final BLE library choice for the SBC runtime is not locked yet.
 
 Rationale:
 
-- BLE reliability and strong multi-connection behavior on Linux
-- Good fit for binary protocol parsing and bitfield-heavy payloads
-- Lower runtime footprint on Raspberry Pi hardware
+- The project goal is MacBook-based development plus Raspberry Pi deployment.
+- A single application-level BLE implementation is preferable if it satisfies the MeatNet requirements on both platforms.
+- A Linux-native backend is still an option if cross-platform validation fails.
+
+### BLE Transport Boundary: shared abstraction with dual backends
+
+The BLE-facing code should be split into:
+
+- a transport-neutral interface for scanning, connecting, reading, writing, and notifications,
+- a candidate cross-platform backend for MacBook and Raspberry Pi validation,
+- an optional Linux-native backend only if production needs demand it.
+
+Rationale:
+
+- Preserves the option of one application-level BLE codebase
+- Allows macOS development and fixture capture from a MacBook Pro
+- Prevents protocol parsing, session logic, and sync code from becoming tied to one BLE library
+- Gives us a clean fallback if Raspberry Pi production needs diverge from MacBook development needs
+
+Design details are defined in [2026-03-07-ble-transport-abstraction-design.md](./2026-03-07-ble-transport-abstraction-design.md).
+
+Critical guardrail:
+
+- If real hardware validation disproves the assumptions in the transport decision framework, implementation must stop and the user must be alerted to a possible architectural problem before work continues.
+- Canonical device identity must be the exact Combustion `productType + serialNumber`, with the serial normalized according to the advertisement family or GATT Device Information data. BLE addresses and peripheral handles are transport-only and must not be used as durable identifiers.
 
 ### SBC Runtime Packaging: OCI Container
 

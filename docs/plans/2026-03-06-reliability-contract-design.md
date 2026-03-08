@@ -43,9 +43,9 @@ The system uses:
 
 | Data Class               | Source                           | Delivery                     | Idempotency Basis                                                               | Loss Boundary                                                                                   | Notes                        |
 | ------------------------ | -------------------------------- | ---------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------- |
-| Temperature readings     | Probe status + probe logs        | At least once                | `(deviceSerial, probeSessionId, sequenceNumber)`                                | Loss possible only if probe log overwritten before recovery and data not in local durable spool | Primary cook timeline        |
-| Prediction snapshots     | Probe status-derived transitions | At least once                | `(deviceSerial, probeSessionId, predictionStateFingerprint, transitionOrdinal)` | Same as above                                                                                   | State-change snapshots only  |
-| Food safety snapshots    | Probe status-derived transitions | At least once                | `(deviceSerial, probeSessionId, foodSafeStateFingerprint, transitionOrdinal)`   | Same as above                                                                                   | State-change snapshots only  |
+| Temperature readings     | Probe status + probe logs        | At least once                | `(deviceProductType, deviceSerial, probeSessionId, sequenceNumber)`                                | Loss possible only if probe log overwritten before recovery and data not in local durable spool | Primary cook timeline        |
+| Prediction snapshots     | Probe status-derived transitions | At least once                | `(deviceProductType, deviceSerial, probeSessionId, predictionStateFingerprint, transitionOrdinal)` | Same as above                                                                                   | State-change snapshots only  |
+| Food safety snapshots    | Probe status-derived transitions | At least once                | `(deviceProductType, deviceSerial, probeSessionId, foodSafeStateFingerprint, transitionOrdinal)`   | Same as above                                                                                   | State-change snapshots only  |
 | Command records          | Web app mutations + SBC updates  | At least once status updates | Command `id` + monotonic state transition constraints                           | Command may expire before execution                                                             | See command contract         |
 | Mesh heartbeats/topology | Node stream                      | Best effort                  | `(nodeSerial, timestampBucket, direction)` as dedup heuristic                   | May be dropped under sustained outage/backpressure                                              | Operational diagnostics only |
 
@@ -79,12 +79,14 @@ In-memory buffering alone is not durable.
 
 ## Canonical Keys
 
-- `temperatureReadings`: unique on `(deviceSerialNumber, probeSessionId, sequenceNumber)`
-- `predictionSnapshots`: unique on `(deviceSerialNumber, probeSessionId, transitionOrdinal)`
-- `foodSafetySnapshots`: unique on `(deviceSerialNumber, probeSessionId, transitionOrdinal)`
+- `temperatureReadings`: unique on `(deviceProductType, deviceSerialNumber, probeSessionId, sequenceNumber)`
+- `predictionSnapshots`: unique on `(deviceProductType, deviceSerialNumber, probeSessionId, transitionOrdinal)`
+- `foodSafetySnapshots`: unique on `(deviceProductType, deviceSerialNumber, probeSessionId, transitionOrdinal)`
 - `deviceCommands`: unique command identity is existing command document id; state transitions are guarded by compare-and-set checks.
 
 `sequenceNumber` alone is never treated as globally unique.
+BLE transport handles are never treated as canonical identity.
+`deviceProductType` means the exact Combustion product type, and `deviceSerialNumber` means the normalized Combustion serial string for that product type.
 
 ## Mutation Behavior
 
@@ -95,7 +97,7 @@ All ingest mutations must be idempotent upserts keyed by canonical keys.
 
 ## Ordering Contract
 
-- Logical order for cook timeline is by `sequenceNumber` within `(deviceSerial, probeSessionId)`.
+- Logical order for cook timeline is by `sequenceNumber` within `(deviceProductType, deviceSerial, probeSessionId)`.
 - `timestamp` is display-oriented sample time; `capturedAt` is ingestion time.
 - Late arrivals are accepted if key is new.
 

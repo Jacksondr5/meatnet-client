@@ -4,7 +4,7 @@
 
 This document outlines the implementation phases for the MeatNet Companion system. Each phase produces a concrete, testable milestone. Phases are ordered by dependency — later phases build on earlier ones.
 
-**Design documents:** `docs/plans/2026-02-21-*.md`, `docs/plans/2026-03-06-reliability-contract-design.md`
+**Design documents:** `docs/plans/2026-02-21-*.md`, `docs/plans/2026-03-06-*.md`, `docs/plans/2026-03-07-ble-transport-abstraction-design.md`
 **BLE protocol specs:** `external-docs/`
 **Detailed phase plans:** `docs/plans/phases/phase-N-*.md`
 
@@ -13,13 +13,14 @@ This document outlines the implementation phases for the MeatNet Companion syste
 ## Phase 1: BLE Foundation
 **Milestone: "I can connect to Combustion devices and receive raw bytes"**
 
-- Rust project scaffold (`sbc-service/` — Cargo.toml, bluer, tokio, axum, reqwest)
-- BLE passive scanning with bluer — discover devices by vendor ID `0x09C7`
-- Node discovery — identify nodes vs probes from product type byte
+- Rust project scaffold (`sbc-service/` — Cargo.toml, chosen BLE library, tokio, axum, reqwest)
+- Validate the chosen BLE library against MeatNet requirements on MacBook and Raspberry Pi
+- BLE scanning — discover devices by vendor ID `0x09C7`
+- Node discovery — classify advertisement families and build canonical device keys from exact Combustion `productType + serialNumber`
 - GATT connection to one node — connect, discover UART service, subscribe to TX notifications
 - Receive raw UART bytes and log to console
 - Reconnection with exponential backoff on disconnect
-- **Requires Raspberry Pi + Combustion hardware from day one**
+- **Do not continue implementation if validation disproves the assumptions in the BLE decision framework**
 
 **Plan:** [phase-1-ble-foundation.md](./phase-1-ble-foundation.md)
 
@@ -49,7 +50,8 @@ This document outlines the implementation phases for the MeatNet Companion syste
   - Prediction status (7-byte bitfield)
   - Food safe data (10-byte) and status (8-byte)
   - Alarm status (22 x uint16)
-  - Full advertising packet parser (24-byte manufacturer data)
+  - Advertisement identity parsers for direct probe, node repeated-probe, and node self-advertisement payloads
+  - Probe advertising packet parser for probe-format manufacturer data
   - Full Probe Status parser (all fields from `0x45`)
   - Read Logs response parser (sequence + temps + prediction log)
 - UART codec — frame sync (`0xCAFE`), CRC-16-CCITT, node request headers (10-byte), node response headers (15-byte), message serialization

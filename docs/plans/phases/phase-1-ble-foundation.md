@@ -2,9 +2,13 @@
 
 **Goal:** Establish BLE connectivity to Combustion Inc devices — scan for advertising packets, connect to a MeatNet node via GATT, and receive raw UART bytes.
 
-**Architecture:** The SBC service is a Rust async application using bluer (BlueZ D-Bus interface) for all BLE operations. It runs a passive advertising scanner and a GATT connection to one MeatNet node concurrently using tokio. Raw bytes are logged to console for verification. This phase produces no parsed data — just raw bytes flowing from hardware through BLE to the console.
+**Architecture:** The SBC service is a Rust async application with a thin BLE transport boundary. The concrete BLE library choice is pending MeatNet-specific validation on MacBook and Raspberry Pi hardware. This phase still targets a passive advertising scanner and a GATT connection to one MeatNet node running concurrently with tokio. Raw bytes are logged to console for verification. This phase produces no parsed data — just raw bytes flowing from hardware through BLE to the console.
 
-**Tech Stack:** Rust, bluer 0.17, tokio 1.x, futures 0.3, anyhow, env_logger. Though, check to see if there are newer versions and use those instead.
+**Tech Stack:** Rust, one validated BLE library, tokio 1.x, futures 0.3, anyhow, env_logger. Though, check to see if there are newer versions and use those instead.
+
+**Implementation note:** Do not assume a `bluer`-first implementation. Start with a MeatNet validation spike using a cross-platform candidate if the goal remains one application-level codebase across MacBook and Raspberry Pi. If the assumptions in the BLE decision framework fail, stop and alert the user before continuing.
+
+**Canonical identity rule:** Treat exact Combustion `productType + serialNumber` as the only durable device key. `serialNumber` is a normalized string derived from the correct advertisement family or confirmed from GATT Device Information data. BLE addresses and peripheral handles may be used to connect in the current process, but must never be used as persistent device identity.
 
 **Reference docs:**
 
@@ -12,11 +16,14 @@
 - `external-docs/meatnet_node_ble_specification.rst` — Node advertising format, GATT services, UART messages (node headers are different from probe headers)
 - `docs/plans/2026-02-21-sbc-service-design.md` — SBC service internal architecture
 - `docs/plans/2026-02-21-meatnet-companion-design.md` — System architecture overview
+- `docs/plans/2026-03-07-ble-transport-abstraction-design.md` — MeatNet BLE decision logic, requirement classification, and stop conditions
 
 **Key BLE facts from specs:**
 
 - Combustion vendor ID: `0x09C7` (manufacturer data key in advertising)
-- Manufacturer data is 24 bytes: vendor ID (2) + product type (1) + serial (4) + raw temps (13) + mode/ID (1) + battery/virtual (1) + network info (1) + overheating (1)
+- Direct probe advertisements carry probe identity using a 4-byte probe serial and include probe advertising data plus Thermometer Preferences
+- Node repeated-probe advertisements carry probe identity using a 4-byte probe serial and include repeated probe advertising data
+- Node self-advertisements for node-family devices such as Display and Booster carry a 10-byte node serial plus product-specific node payload fields
 - Product types: 0=Unknown, 1=Predictive Probe, 2=MeatNet Repeater, 3=Giant Grill Gauge, 4=Display, 5=Booster
 - Node UART service UUID: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
 - Node UART RX (write to device): `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
@@ -338,13 +345,45 @@ use super::constants::COMBUSTION_VENDOR_ID;
 use crate::types::ProductType;
 
 /// Information about a discovered Combustion device.
+/// `peripheral_handle` is transport-only; exact Combustion
+/// `product_type + serial_number`
+/// is the durable application identity.
 #[derive(Debug)]
 pub struct DiscoveredDevice {
-    pub address: Address,
+    pub peripheral_handle: Address,
     pub product_type: ProductType,
-    pub serial_number: u32,
+    pub serial_number: String,
     pub rssi: Option<i16>,
     pub raw_manufacturer_data: Vec<u8>,
+}
+
+fn parse_normalized_serial(product_type: ProductType, data: &[u8]) -> Option<String> {
+    match product_type {
+        ProductType::PredictiveProbe => {
+            if data.len() < 5 {
+                return None;
+            }
+            let serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+            Some(format!("{serial:08X}"))
+        }
+        ProductType::MeatNetRepeater
+        | ProductType::GiantGrillGauge
+        | ProductType::Display
+        | ProductType::Booster => {
+            if data.len() >= 11 {
+                let serial_bytes = &data[1..11];
+                let serial = std::str::from_utf8(serial_bytes).ok()?;
+                Some(serial.trim_end_matches('\0').to_string())
+            } else if data.len() >= 5 {
+                // Node repeated-probe advertisements reuse the probe identity layout.
+                let probe_serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                Some(format!("{probe_serial:08X}"))
+            } else {
+                None
+            }
+        }
+        ProductType::Unknown => None,
+    }
 }
 
 /// Parse a discovered bluer Device into a DiscoveredDevice if it's a Combustion device.
@@ -353,21 +392,20 @@ async fn parse_combustion_device(device: &Device) -> Option<DiscoveredDevice> {
     let manufacturer_data = device.manufacturer_data().await.ok()??;
     let data = manufacturer_data.get(&COMBUSTION_VENDOR_ID)?;
 
-    if data.len() < 22 {
+    if data.is_empty() {
         log::warn!(
-            "Combustion device {} has short manufacturer data ({} bytes, expected >= 22)",
+            "Combustion device {} has empty manufacturer data",
             device.address(),
-            data.len()
         );
         return None;
     }
 
     let product_type = ProductType::from_byte(data[0]);
-    let serial_number = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    let serial_number = parse_normalized_serial(product_type, data)?;
     let rssi = device.rssi().await.ok()?;
 
     Some(DiscoveredDevice {
-        address: device.address(),
+        peripheral_handle: device.address(),
         product_type,
         serial_number,
         rssi,
@@ -377,7 +415,8 @@ async fn parse_combustion_device(device: &Device) -> Option<DiscoveredDevice> {
 
 /// Run the passive BLE advertising scanner.
 /// Discovers Combustion devices and logs their information.
-/// When a node is discovered, calls `on_node_found` with the device address.
+/// When a node is discovered, calls `on_node_found` with the current
+/// transport handle. Callers must not treat that handle as durable identity.
 ///
 /// This function runs forever (until the adapter stream ends or an error occurs).
 pub async fn run_scanner(
@@ -400,7 +439,7 @@ pub async fn run_scanner(
                     seen_devices.insert(addr, discovered.product_type);
 
                     log::info!(
-                        "Combustion device: addr={} type={:?} serial={:08X} rssi={:?} data=[{}]",
+                        "Combustion device: handle={} key={:?}:{} rssi={:?} data=[{}]",
                         addr,
                         discovered.product_type,
                         discovered.serial_number,
@@ -420,7 +459,11 @@ pub async fn run_scanner(
             }
             AdapterEvent::DeviceRemoved(addr) => {
                 if let Some(product_type) = seen_devices.remove(&addr) {
-                    log::debug!("Device removed: addr={} type={:?}", addr, product_type);
+                    log::debug!(
+                        "Device removed: handle={} type={:?}",
+                        addr,
+                        product_type
+                    );
                 }
             }
             _ => {}
@@ -470,7 +513,7 @@ async fn main() -> Result<()> {
     log::info!("Starting BLE scan for Combustion devices...");
     ble::scanner::run_scanner(&adapter, |addr, device| {
         log::info!(
-            ">>> Node discovered: addr={} type={:?} serial={:08X}",
+            ">>> Node discovered: handle={} key={:?}:{}",
             addr,
             device.product_type,
             device.serial_number
@@ -495,15 +538,15 @@ Run on the Raspberry Pi with Combustion devices nearby:
 RUST_LOG=info cargo run
 ```
 
-Expected output (device addresses and serials will vary):
+Expected output (transport handles and serials will vary):
 
 ```
 [INFO] SBC service starting
 [INFO] Using Bluetooth adapter: hci0
 [INFO] Starting BLE scan for Combustion devices...
-[INFO] Combustion device: addr=C2:71:0C:83:FE:50 type=PredictiveProbe serial=10005205 rssi=Some(-65) data=[01 05 52 00 10 ...]
-[INFO] Combustion device: addr=C5:BC:E2:1B:48:F6 type=Booster serial=10005205 rssi=Some(-86) data=[05 05 52 00 10 ...]
-[INFO] >>> Node discovered: addr=C5:BC:E2:1B:48:F6 type=Booster serial=10005205
+[INFO] Combustion device: handle=C2:71:0C:83:FE:50 key=PredictiveProbe:00F45A2C rssi=Some(-65) data=[01 2c 5a f4 00 ...]
+[INFO] Combustion device: handle=C5:BC:E2:1B:48:F6 key=Booster:CR100010EB rssi=Some(-86) data=[05 43 52 31 30 30 30 31 30 45 42 ...]
+[INFO] >>> Node discovered: handle=C5:BC:E2:1B:48:F6 key=Booster:CR100010EB
 ```
 
 Verify:
@@ -511,8 +554,8 @@ Verify:
 - Probes show as `PredictiveProbe`
 - Nodes (Repeater/Display/Booster) show as their correct type
 - `>>> Node discovered` messages appear only for node devices
-- Raw manufacturer data bytes are 22 bytes long
-- Serial numbers match what you see in the Combustion app
+- Direct probe, node repeated-probe, and node self-advertisements each produce the expected canonical key format
+- Serial numbers match the device-family format from the Combustion specs and the node-family serial matches GATT Device Information after connect
 
 **Step 6: Commit**
 
@@ -749,11 +792,11 @@ Expected output:
 [INFO] SBC service starting
 [INFO] Using Bluetooth adapter: hci0
 [INFO] Scanning for MeatNet nodes...
-[INFO] Combustion device: addr=C5:BC:E2:1B:48:F6 type=Booster serial=10005205 rssi=Some(-45) data=[...]
+[INFO] Combustion device: handle=C5:BC:E2:1B:48:F6 key=Booster:CR100010EB rssi=Some(-45) data=[...]
 [INFO] >>> Node discovered: ...
-[INFO] Found node at C5:BC:E2:1B:48:F6, connecting...
-[INFO] Connecting to node at C5:BC:E2:1B:48:F6...
-[INFO] Connected to node at C5:BC:E2:1B:48:F6
+[INFO] Found node via handle C5:BC:E2:1B:48:F6, connecting...
+[INFO] Connecting to node via handle C5:BC:E2:1B:48:F6...
+[INFO] Connected to node via handle C5:BC:E2:1B:48:F6
 [INFO] Found UART service
 [INFO] Found UART TX characteristic
 [INFO] Subscribing to UART TX notifications...

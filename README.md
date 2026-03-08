@@ -6,6 +6,7 @@ This repository contains the MeatNet client project, which will become a client 
 
 - `docs/`: project planning, design notes, and architecture documentation.
 - `external-docs/`: external Combustion BLE specification documents used as protocol reference.
+- `tools/`: focused validation spikes and developer utilities.
 
 ## Sync external documentation
 
@@ -16,3 +17,13 @@ This repository contains the MeatNet client project, which will become a client 
 ```
 
 This is the project’s docs sync command (sometimes referenced as `syncdocs`).
+
+## Validation spike
+
+A minimal Rust validation tool for cross-platform BLE checks with `btleplug` lives in:
+
+```bash
+tools/btleplug-spike/
+```
+
+Its purpose is to validate the MeatNet BLE requirements on macOS and Raspberry Pi before we commit to a production library choice.
