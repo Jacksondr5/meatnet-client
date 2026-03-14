@@ -1,4 +1,5 @@
 mod ble;
+mod discovery_cache;
 mod types;
 
 use std::future::Future;
@@ -12,9 +13,11 @@ use ble::transport::{
     AdvertisementFamily, BleTransport, ConnectedPeripheral, DeviceInfo, DiscoveryEvent,
     NotificationEvent, NotificationSource, ServiceSummary, WriteMode,
 };
+use discovery_cache::{CachedDiscovery, load_recent_target, record_discoveries};
 use types::ProductType;
 
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
+const DISCOVERY_CACHE_MAX_AGE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Parser)]
 #[command(name = "sbc-service")]
@@ -84,6 +87,8 @@ async fn scan(scan_seconds: u64) -> Result<()> {
             }
         };
 
+    record_discoveries(&discoveries)?;
+
     if discoveries.is_empty() {
         println!("No Combustion advertisements discovered.");
         return Ok(());
@@ -124,13 +129,14 @@ async fn inspect(
                 return Ok(());
             }
         };
+    record_discoveries(&discoveries)?;
     let target = pick_target(&discoveries, product_type, &normalized_serial)?;
 
     println!("Selected target:");
-    print_discovery(target);
+    print_target(&target);
 
     let peripheral =
-        match await_with_shutdown_grace("connect", transport.connect(&target.peripheral_handle))
+        match await_with_shutdown_grace("connect", transport.connect(target.peripheral_handle()))
             .await?
         {
             OperationOutcome::Completed(peripheral) => peripheral,
@@ -165,6 +171,7 @@ async fn inspect(
                 return Ok(());
             }
         };
+    confirm_connected_identity(&target, &device_info)?;
 
     println!("Validation summary:");
     print_service_summary(&services);
@@ -264,7 +271,7 @@ fn pick_target<'a>(
     discoveries: &'a [DiscoveryEvent],
     product_type: ProductType,
     serial_number: &str,
-) -> Result<&'a DiscoveryEvent> {
+) -> Result<TargetSelection<'a>> {
     let matching: Vec<_> = discoveries
         .iter()
         .filter(|discovery| {
@@ -272,16 +279,12 @@ fn pick_target<'a>(
         })
         .collect();
 
-    if matching.is_empty() {
-        bail!("no advertisement matched {product_type}:{serial_number}");
-    }
-
     if product_type.is_probe() {
         if let Some(discovery) = matching
             .iter()
             .find(|discovery| discovery.advertisement_family == AdvertisementFamily::DirectProbe)
         {
-            return Ok(discovery);
+            return Ok(TargetSelection::Fresh(discovery));
         }
 
         let repeated_probe_count = matching
@@ -297,7 +300,95 @@ fn pick_target<'a>(
         }
     }
 
-    Ok(matching[0])
+    if let Some(discovery) = matching.first() {
+        return Ok(TargetSelection::Fresh(discovery));
+    }
+
+    if product_type.is_node() {
+        if let Some(cached) =
+            load_recent_target(product_type, serial_number, DISCOVERY_CACHE_MAX_AGE)?
+        {
+            return Ok(TargetSelection::Cached(cached));
+        }
+    }
+
+    bail!("no advertisement matched {product_type}:{serial_number}");
+}
+
+enum TargetSelection<'a> {
+    Fresh(&'a DiscoveryEvent),
+    Cached(CachedDiscovery),
+}
+
+impl<'a> TargetSelection<'a> {
+    fn peripheral_handle(&self) -> &str {
+        match self {
+            Self::Fresh(discovery) => &discovery.peripheral_handle,
+            Self::Cached(discovery) => &discovery.peripheral_handle,
+        }
+    }
+
+    fn product_type(&self) -> ProductType {
+        match self {
+            Self::Fresh(discovery) => discovery.product_type,
+            Self::Cached(discovery) => discovery.product_type,
+        }
+    }
+
+    fn serial_number(&self) -> &str {
+        match self {
+            Self::Fresh(discovery) => &discovery.serial_number,
+            Self::Cached(discovery) => &discovery.serial_number,
+        }
+    }
+
+    fn used_cache_fallback(&self) -> bool {
+        matches!(self, Self::Cached(_))
+    }
+}
+
+fn print_target(target: &TargetSelection<'_>) {
+    match target {
+        TargetSelection::Fresh(discovery) => print_discovery(discovery),
+        TargetSelection::Cached(discovery) => {
+            println!("handle={}", discovery.peripheral_handle);
+            println!(
+                "  key={}:{}",
+                discovery.product_type, discovery.serial_number
+            );
+            println!("  family={}", discovery.advertisement_family.slug());
+            println!("  source=cached-discovery");
+        }
+    }
+}
+
+fn confirm_connected_identity(
+    target: &TargetSelection<'_>,
+    device_info: &DeviceInfo,
+) -> Result<()> {
+    if !target.product_type().is_node() {
+        return Ok(());
+    }
+
+    let connected_serial = device_info.serial.as_deref().ok_or_else(|| {
+        anyhow!("connected node did not expose a GATT serial for identity confirmation")
+    })?;
+
+    if connected_serial != target.serial_number() {
+        bail!(
+            "connected node identity mismatch: expected {}:{}, got {}:{}",
+            target.product_type(),
+            target.serial_number(),
+            target.product_type(),
+            connected_serial
+        );
+    }
+
+    if target.used_cache_fallback() {
+        println!("Confirmed node identity from GATT serial after cached target fallback.");
+    }
+
+    Ok(())
 }
 
 fn print_discovery(discovery: &DiscoveryEvent) {

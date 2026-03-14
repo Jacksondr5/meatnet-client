@@ -1,8 +1,10 @@
 use std::fmt;
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProductType {
     Unknown,
     PredictiveProbe,
@@ -37,6 +39,10 @@ impl ProductType {
 
     pub fn is_probe(self) -> bool {
         matches!(self, Self::PredictiveProbe)
+    }
+
+    pub fn is_node(self) -> bool {
+        matches!(self, Self::MeatNetRepeater | Self::Display | Self::Booster)
     }
 }
 

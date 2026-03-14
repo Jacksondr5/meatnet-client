@@ -2,11 +2,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::ProductType;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AdvertisementFamily {
     DirectProbe,
     NodeRepeatedProbe,
