@@ -25,6 +25,7 @@ This note tracks important design items outside of resilience/error handling so 
 
 - Define deployment/runtime management on SBC (service manager, restart policy, update path).
 - Add baseline observability plan (structured logs, metrics, health endpoints, alert thresholds).
+- Investigate transient BlueZ service-discovery timeouts observed during Raspberry Pi Phase 1 validation, especially after repeated or cached-handle node connects, and define the retry/diagnostic strategy before long-running service work.
 - Define incident triage workflow for “data gap,” “command failures,” and “network degraded” reports.
 
 ## 5. Testing Coverage Gaps (Non-Error)
