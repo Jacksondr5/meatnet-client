@@ -19,7 +19,6 @@ This document outlines the implementation phases for the MeatNet Companion syste
 - Node discovery — classify advertisement families and build canonical device keys from exact Combustion `productType + serialNumber`
 - GATT connection to one node — connect, discover UART service, subscribe to TX notifications
 - Receive raw UART bytes and log to console
-- Reconnection with exponential backoff on disconnect
 - **Do not continue implementation if validation disproves the assumptions in the BLE decision framework**
 
 **Plan:** [phase-1-ble-foundation.md](./phase-1-ble-foundation.md)
@@ -90,6 +89,7 @@ This document outlines the implementation phases for the MeatNet Companion syste
 - Session manager — detect new sessions from session ID changes, create/end sessions in Convex
 - Convex sync layer — reqwest HTTP client, fixed-interval persistence, command polling
 - Main application loop wiring: BLE → decode → session manager → Convex sync
+- Connection lifecycle management — desired connection state, disconnect handling, automatic reconnection with backoff
 - SBC startup: query Convex for active sessions, reconnect, resume
 - Durable local spooling for outbound Convex events
 - Containerize SBC runtime (OCI image) with persistent mounts for spool/state

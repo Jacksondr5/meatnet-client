@@ -4,9 +4,11 @@
 
 **Architecture:** Phase 1 established BLE scanning and node connection with console logging. Phase 2 introduces a `tokio::sync::broadcast` channel as an event bus — the scanner and connection emit typed events, which are consumed by a fixture writer (saves to JSON) and a debug server (streams to browser via WebSocket). The debug server is embedded in the same Rust binary using axum.
 
+**Identity note:** Advertising events in this phase must carry both canonical device identity and advertisement family. Fixture capture is not just raw bytes; it must preserve enough context to distinguish direct probe advertisements, node repeated-probe advertisements, and node self-advertisements.
+
 **Tech Stack (additions to Phase 1):** axum 0.7 (web server + WebSocket), serde + serde_json (serialization), clap 4 (CLI arguments)
 
-**Prerequisite:** Phase 1 complete — `sbc-service/` builds, BLE scanning and UART notifications work on hardware.
+**Prerequisite:** Phase 1 complete — `sbc-service/` builds, and the validation `scan` / `inspect` flows work on hardware.
 
 **Reference docs:**
 
@@ -59,7 +61,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 axum = "0.7"
-bluer = { version = "0.17", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 futures = "0.3"
@@ -167,6 +168,7 @@ pub enum BleEvent {
     Advertising {
         timestamp_ms: u64,
         peripheral_handle: String,
+        advertisement_family: String,
         product_type: String,
         serial_number: String,
         rssi: Option<i16>,
@@ -190,6 +192,7 @@ impl BleEvent {
     /// Create an Advertising event from scanner data.
     pub fn advertising(
         peripheral_handle: bluer::Address,
+        advertisement_family: &str,
         product_type: ProductType,
         serial_number: String,
         rssi: Option<i16>,
@@ -198,7 +201,8 @@ impl BleEvent {
         BleEvent::Advertising {
             timestamp_ms: now_ms(),
             peripheral_handle: peripheral_handle.to_string(),
-            product_type: format!("{:?}", product_type),
+            advertisement_family: advertisement_family.to_string(),
+            product_type: product_type.slug().to_string(),
             serial_number,
             rssi,
             raw_bytes_hex: bytes_to_hex(raw_bytes),
@@ -319,7 +323,8 @@ mod tests {
         let json = serde_json::to_value(BleEvent::Advertising {
             timestamp_ms: 1000,
             peripheral_handle: "AA:BB:CC:DD:EE:FF".to_string(),
-            product_type: "PredictiveProbe".to_string(),
+            advertisement_family: "direct-probe".to_string(),
+            product_type: "predictive-probe".to_string(),
             serial_number: "10005205".to_string(),
             rssi: Some(-65),
             raw_bytes_hex: "cafe01".to_string(),
@@ -386,6 +391,8 @@ This task modifies the Phase 1 scanner and connection to emit events through a b
 
 Modify `run_scanner` to accept a broadcast sender and emit Advertising events:
 
+The scanner example below shows a Linux backend implementation of the event-emission flow. If validation selects a different backend, keep the same event shape and identity fields while translating backend-specific types and scan APIs.
+
 ```rust
 // sbc-service/src/ble/scanner.rs
 use std::collections::HashMap;
@@ -403,36 +410,58 @@ use crate::types::ProductType;
 #[derive(Debug)]
 pub struct DiscoveredDevice {
     pub peripheral_handle: Address,
+    pub advertisement_family: AdvertisementFamily,
     pub product_type: ProductType,
     pub serial_number: String,
     pub rssi: Option<i16>,
     pub raw_manufacturer_data: Vec<u8>,
 }
 
-fn parse_normalized_serial(product_type: ProductType, data: &[u8]) -> Option<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisementFamily {
+    DirectProbe,
+    NodeRepeatedProbe,
+    NodeSelf,
+}
+
+impl AdvertisementFamily {
+    pub fn slug(&self) -> &'static str {
+        match self {
+            AdvertisementFamily::DirectProbe => "direct-probe",
+            AdvertisementFamily::NodeRepeatedProbe => "node-repeated-probe",
+            AdvertisementFamily::NodeSelf => "node-self",
+        }
+    }
+}
+
+fn classify_advertisement_family(product_type: ProductType, data: &[u8]) -> Option<AdvertisementFamily> {
     match product_type {
-        ProductType::PredictiveProbe => {
+        ProductType::PredictiveProbe if data.len() >= 22 => Some(AdvertisementFamily::NodeRepeatedProbe),
+        ProductType::PredictiveProbe if data.len() >= 21 => Some(AdvertisementFamily::DirectProbe),
+        ProductType::MeatNetRepeater
+        | ProductType::GiantGrillGauge
+        | ProductType::Display
+        | ProductType::Booster if data.len() >= 11 => Some(AdvertisementFamily::NodeSelf),
+        _ => None,
+    }
+}
+
+fn parse_normalized_serial(advertisement_family: AdvertisementFamily, data: &[u8]) -> Option<String> {
+    match advertisement_family {
+        AdvertisementFamily::DirectProbe | AdvertisementFamily::NodeRepeatedProbe => {
             if data.len() < 5 {
                 return None;
             }
             let serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
             Some(format!("{serial:08X}"))
         }
-        ProductType::MeatNetRepeater
-        | ProductType::GiantGrillGauge
-        | ProductType::Display
-        | ProductType::Booster => {
-            if data.len() >= 11 {
-                let serial = std::str::from_utf8(&data[1..11]).ok()?;
-                Some(serial.trim_end_matches('\0').to_string())
-            } else if data.len() >= 5 {
-                let probe_serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                Some(format!("{probe_serial:08X}"))
-            } else {
-                None
+        AdvertisementFamily::NodeSelf => {
+            if data.len() < 11 {
+                return None;
             }
+            let serial = std::str::from_utf8(&data[1..11]).ok()?;
+            Some(serial.trim_end_matches('\0').to_string())
         }
-        ProductType::Unknown => None,
     }
 }
 
@@ -451,11 +480,13 @@ async fn parse_combustion_device(device: &Device) -> Option<DiscoveredDevice> {
     }
 
     let product_type = ProductType::from_byte(data[0]);
-    let serial_number = parse_normalized_serial(product_type, data)?;
+    let advertisement_family = classify_advertisement_family(product_type, data)?;
+    let serial_number = parse_normalized_serial(advertisement_family, data)?;
     let rssi = device.rssi().await.ok()?;
 
     Some(DiscoveredDevice {
         peripheral_handle: device.address(),
+        advertisement_family,
         product_type,
         serial_number,
         rssi,
@@ -493,6 +524,7 @@ pub async fn run_scanner(
                     // Emit event (ignore send errors — no subscribers is OK)
                     let _ = event_tx.send(BleEvent::advertising(
                         discovered.peripheral_handle,
+                        discovered.advertisement_family.slug(),
                         discovered.product_type,
                         discovered.serial_number.clone(),
                         discovered.rssi,
@@ -500,14 +532,18 @@ pub async fn run_scanner(
                     ));
 
                     log::info!(
-                        "Combustion device: handle={} key={:?}:{} rssi={:?}",
+                        "Combustion device: handle={} family={:?} key={}:{} rssi={:?}",
                         addr,
-                        discovered.product_type,
+                        discovered.advertisement_family,
+                        discovered.product_type.slug(),
                         discovered.serial_number,
                         discovered.rssi,
                     );
 
-                    if is_new && discovered.product_type.is_node() {
+                    if is_new
+                        && discovered.advertisement_family == AdvertisementFamily::NodeSelf
+                        && discovered.product_type.is_node()
+                    {
                         on_node_found(addr, &discovered);
                     }
                 }
@@ -842,6 +878,8 @@ pub struct CaptureEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peripheral_handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub advertisement_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_number: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_type: Option<String>,
@@ -855,6 +893,7 @@ impl From<&BleEvent> for CaptureEntry {
             BleEvent::Advertising {
                 timestamp_ms,
                 peripheral_handle,
+                advertisement_family,
                 product_type,
                 serial_number,
                 raw_bytes_hex,
@@ -865,6 +904,7 @@ impl From<&BleEvent> for CaptureEntry {
                 raw_bytes: raw_bytes_hex.clone(),
                 message_type: None,
                 peripheral_handle: Some(peripheral_handle.clone()),
+                advertisement_family: Some(advertisement_family.clone()),
                 serial_number: Some(serial_number.clone()),
                 product_type: Some(product_type.clone()),
                 note: None,
@@ -880,6 +920,7 @@ impl From<&BleEvent> for CaptureEntry {
                 raw_bytes: raw_bytes_hex.clone(),
                 message_type: message_type.clone(),
                 peripheral_handle: None,
+                advertisement_family: None,
                 serial_number: None,
                 product_type: None,
                 note: None,
@@ -923,8 +964,7 @@ impl CaptureWriter {
                         ..
                     } = &event
                     {
-                        let device_id =
-                            format!("{}:{}", product_type.to_lowercase(), serial_number);
+                        let device_id = format!("{product_type}:{serial_number}");
                         if !self.devices_seen.contains(&device_id) {
                             self.devices_seen.push(device_id);
                         }
@@ -981,7 +1021,8 @@ mod tests {
         let event = BleEvent::Advertising {
             timestamp_ms: 1000,
             peripheral_handle: "AA:BB:CC:DD:EE:FF".to_string(),
-            product_type: "PredictiveProbe".to_string(),
+            advertisement_family: "direct-probe".to_string(),
+            product_type: "predictive-probe".to_string(),
             serial_number: "10005205".to_string(),
             rssi: Some(-65),
             raw_bytes_hex: "0105520010cafe".to_string(),
@@ -991,6 +1032,10 @@ mod tests {
         assert_eq!(entry.timestamp, 1000);
         assert_eq!(entry.raw_bytes, "0105520010cafe");
         assert_eq!(entry.serial_number, Some("10005205".to_string()));
+        assert_eq!(
+            entry.advertisement_family,
+            Some("direct-probe".to_string())
+        );
         assert_eq!(
             entry.peripheral_handle,
             Some("AA:BB:CC:DD:EE:FF".to_string())
@@ -1026,8 +1071,9 @@ mod tests {
                 raw_bytes: "cafe01".to_string(),
                 message_type: None,
                 peripheral_handle: Some("AA:BB:CC:DD:EE:FF".to_string()),
+                advertisement_family: Some("direct-probe".to_string()),
                 serial_number: Some("AABBCCDD".to_string()),
-                product_type: Some("PredictiveProbe".to_string()),
+                product_type: Some("predictive-probe".to_string()),
                 note: None,
             }],
         };
@@ -1047,6 +1093,7 @@ mod tests {
             raw_bytes: "cafe".to_string(),
             message_type: Some("0x45".to_string()),
             peripheral_handle: None,
+            advertisement_family: None,
             serial_number: None,
             product_type: None,
             note: None,
@@ -1074,6 +1121,7 @@ mod tests {
             raw_bytes: "cafe0045".to_string(),
             message_type: Some("0x45".to_string()),
             peripheral_handle: None,
+            advertisement_family: None,
             serial_number: None,
             product_type: None,
             note: None,

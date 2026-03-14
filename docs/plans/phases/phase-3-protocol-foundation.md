@@ -1196,12 +1196,22 @@ git commit -m "feat: alarm status parser"
 
 **Step 1: Add advertisement types**
 
+Identity parsing in this phase is family-specific. The parser should not infer canonical serial format from product type alone.
+
 ```rust
 // Append to types.rs
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum AdvertisementFamily {
+    DirectProbe,
+    NodeRepeatedProbe,
+    NodeSelf,
+}
 
 /// Canonical identity extracted from an advertisement.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AdvertisementIdentity {
+    pub family: AdvertisementFamily,
     pub product_type: ProductType,
     pub serial_number: String,
 }
@@ -1229,20 +1239,20 @@ use super::types::*;
 /// Parse canonical identity from a Combustion advertisement payload.
 ///
 /// `data` is the manufacturer data after the 2-byte company ID.
-pub fn parse_advertisement_identity(data: &[u8]) -> AdvertisementIdentity {
+pub fn parse_advertisement_identity(
+    family: AdvertisementFamily,
+    data: &[u8],
+) -> AdvertisementIdentity {
     assert!(!data.is_empty(), "advertisement data must not be empty");
 
     let product_type = ProductType::from_byte(data[0]);
-    let serial_number = match product_type {
-        ProductType::PredictiveProbe => {
+    let serial_number = match family {
+        AdvertisementFamily::DirectProbe | AdvertisementFamily::NodeRepeatedProbe => {
             assert!(data.len() >= 5, "probe advertisement must include 4-byte serial");
             let serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
             format!("{serial:08X}")
         }
-        ProductType::MeatNetRepeater
-        | ProductType::GiantGrillGauge
-        | ProductType::Display
-        | ProductType::Booster => {
+        AdvertisementFamily::NodeSelf => {
             assert!(
                 data.len() >= 11,
                 "node self-advertisement must include 10-byte serial"
@@ -1252,10 +1262,10 @@ pub fn parse_advertisement_identity(data: &[u8]) -> AdvertisementIdentity {
                 .trim_end_matches('\0')
                 .to_string()
         }
-        ProductType::Unknown => String::new(),
     };
 
     AdvertisementIdentity {
+        family,
         product_type,
         serial_number,
     }
@@ -1348,14 +1358,22 @@ mod tests {
 
     #[test]
     fn parse_probe_advertisement_identity() {
-        let identity = parse_advertisement_identity(&[0x01, 0xDD, 0xCC, 0xBB, 0xAA]);
+        let identity = parse_advertisement_identity(
+            AdvertisementFamily::DirectProbe,
+            &[0x01, 0xDD, 0xCC, 0xBB, 0xAA],
+        );
+        assert_eq!(identity.family, AdvertisementFamily::DirectProbe);
         assert_eq!(identity.product_type, ProductType::PredictiveProbe);
         assert_eq!(identity.serial_number, "AABBCCDD");
     }
 
     #[test]
     fn parse_node_advertisement_identity() {
-        let identity = parse_advertisement_identity(b"\x05CR100010EB");
+        let identity = parse_advertisement_identity(
+            AdvertisementFamily::NodeSelf,
+            b"\x05CR100010EB",
+        );
+        assert_eq!(identity.family, AdvertisementFamily::NodeSelf);
         assert_eq!(identity.product_type, ProductType::Booster);
         assert_eq!(identity.serial_number, "CR100010EB");
     }
@@ -1874,7 +1892,7 @@ mod tests {
         // Temperatures all zero → -20°C each
 
         let result = parse_log_entry(&payload);
-        assert_eq!(result.serial_number, 0xAABBCCDD);
+        assert_eq!(result.probe_serial_number, 0xAABBCCDD);
         assert_eq!(result.sequence_number, 42);
         assert!((result.temperatures.values[0] - (-20.0)).abs() < 0.05);
     }

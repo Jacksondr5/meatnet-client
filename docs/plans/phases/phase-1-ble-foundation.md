@@ -1,12 +1,14 @@
 # Phase 1: BLE Foundation Implementation Plan
 
-**Goal:** Establish BLE connectivity to Combustion Inc devices — scan for advertising packets, connect to a MeatNet node via GATT, and receive raw UART bytes.
+**Goal:** Establish BLE connectivity to Combustion Inc devices with a validation-first CLI — scan for advertising packets, connect to a MeatNet node via GATT, and receive raw UART bytes.
 
-**Architecture:** The SBC service is a Rust async application with a thin BLE transport boundary. The concrete BLE library choice is pending MeatNet-specific validation on MacBook and Raspberry Pi hardware. This phase still targets a passive advertising scanner and a GATT connection to one MeatNet node running concurrently with tokio. Raw bytes are logged to console for verification. This phase produces no parsed data — just raw bytes flowing from hardware through BLE to the console.
+**Architecture:** The SBC service starts as a Rust async validation tool with a thin BLE transport boundary. Phase 1 should define that boundary first, then implement one provisional backend behind it while hardware validation is still in progress. The concrete BLE library choice is pending MeatNet-specific validation on MacBook and Raspberry Pi hardware. This phase targets explicit `scan` and `inspect` flows for advertisement discovery, GATT connection to one MeatNet node, and raw notification capture. Those flows should be expressed through transport-neutral types first. Raw bytes are logged to console for verification. This phase produces no parsed data and no long-running runtime behavior — just raw bytes flowing from hardware through BLE to the operator.
 
-**Tech Stack:** Rust, one validated BLE library, tokio 1.x, futures 0.3, anyhow, env_logger. Though, check to see if there are newer versions and use those instead.
+**Tech Stack:** Rust, one provisional BLE backend behind a transport-neutral interface, tokio 1.x, futures 0.3, anyhow, env_logger, `async-trait`, and `uuid`. Though, check to see if there are newer versions and use those instead.
 
 **Implementation note:** Do not assume a `bluer`-first implementation. Start with a MeatNet validation spike using a cross-platform candidate if the goal remains one application-level codebase across MacBook and Raspberry Pi. If the assumptions in the BLE decision framework fail, stop and alert the user before continuing.
+
+**Backend note:** The transport-neutral rules in this phase are normative. Any backend-specific code shown below is illustrative and should be adapted to the selected BLE backend after validation.
 
 **Canonical identity rule:** Treat exact Combustion `productType + serialNumber` as the only durable device key. `serialNumber` is a normalized string derived from the correct advertisement family or confirmed from GATT Device Information data. BLE addresses and peripheral handles may be used to connect in the current process, but must never be used as persistent device identity.
 
@@ -45,9 +47,10 @@ sbc-service/
 │   ├── main.rs              # Application entry point and main loop
 │   ├── ble/
 │   │   ├── mod.rs            # Module declarations
+│   │   ├── transport.rs      # Transport-neutral traits and event types
 │   │   ├── constants.rs      # BLE UUIDs, vendor ID, service constants
-│   │   ├── scanner.rs        # Passive advertising scanner
-│   │   └── connection.rs     # GATT connection to node + UART subscription
+│   │   ├── scanner.rs        # Provisional backend scanner implementation
+│   │   └── connection.rs     # Provisional backend node connection implementation
 │   └── types.rs              # Domain types (ProductType)
 ```
 
@@ -81,11 +84,12 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-bluer = { version = "0.17", features = ["full"] }
+async-trait = "0.1"
 env_logger = "0.11"
 futures = "0.3"
 log = "0.4"
 tokio = { version = "1", features = ["full"] }
+uuid = "1"
 ```
 
 **Step 3: Create minimal main.rs**
@@ -148,6 +152,11 @@ impl ProductType {
         todo!()
     }
 
+    /// Canonical slug used in persisted keys, routes, and fixture metadata.
+    pub fn slug(&self) -> &'static str {
+        todo!()
+    }
+
     /// Returns true if this device type is a MeatNet node (can be used as a gateway).
     pub fn is_node(&self) -> bool {
         todo!()
@@ -187,6 +196,16 @@ mod tests {
         assert!(!ProductType::GiantGrillGauge.is_node());
         assert!(!ProductType::Unknown.is_node());
     }
+
+    #[test]
+    fn slug_returns_canonical_product_type_names() {
+        assert_eq!(ProductType::PredictiveProbe.slug(), "predictive-probe");
+        assert_eq!(ProductType::MeatNetRepeater.slug(), "meatnet-repeater");
+        assert_eq!(ProductType::GiantGrillGauge.slug(), "giant-grill-gauge");
+        assert_eq!(ProductType::Display.slug(), "display");
+        assert_eq!(ProductType::Booster.slug(), "booster");
+        assert_eq!(ProductType::Unknown.slug(), "unknown");
+    }
 }
 ```
 
@@ -217,6 +236,17 @@ impl ProductType {
             self,
             ProductType::MeatNetRepeater | ProductType::Display | ProductType::Booster
         )
+    }
+
+    pub fn slug(&self) -> &'static str {
+        match self {
+            ProductType::Unknown => "unknown",
+            ProductType::PredictiveProbe => "predictive-probe",
+            ProductType::MeatNetRepeater => "meatnet-repeater",
+            ProductType::GiantGrillGauge => "giant-grill-gauge",
+            ProductType::Display => "display",
+            ProductType::Booster => "booster",
+        }
     }
 }
 ```
@@ -253,11 +283,99 @@ git commit -m "feat: add ProductType domain type with tests"
 
 ---
 
-## Task 3: BLE Constants
+## Task 3: Transport Boundary
 
 **Files:**
 
-- Create: `sbc-service/src/ble/mod.rs`
+- Create: `sbc-service/src/ble/transport.rs`
+- Modify: `sbc-service/src/ble/mod.rs`
+
+**Step 1: Define the transport-neutral types and traits**
+
+Create `sbc-service/src/ble/transport.rs`:
+
+```rust
+// sbc-service/src/ble/transport.rs
+use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::types::ProductType;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisementFamily {
+    DirectProbe,
+    NodeRepeatedProbe,
+    NodeSelf,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscoveryEvent {
+    pub peripheral_handle: String,
+    pub advertisement_family: AdvertisementFamily,
+    pub product_type: ProductType,
+    pub serial_number: String,
+    pub rssi: Option<i16>,
+    pub raw_manufacturer_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotifyEvent {
+    pub raw_bytes: Vec<u8>,
+}
+
+#[async_trait]
+pub trait BleTransport {
+    type Peripheral: ConnectedPeripheral;
+
+    async fn start_scan(
+        &self,
+        on_discovery: impl Fn(DiscoveryEvent) + Send + 'static,
+    ) -> anyhow::Result<()>;
+
+    async fn connect(&self, peripheral_handle: &str) -> anyhow::Result<Self::Peripheral>;
+}
+
+#[async_trait]
+pub trait ConnectedPeripheral {
+    async fn discover_uart_characteristics(&self) -> anyhow::Result<UartCharacteristics>;
+    async fn disconnect(&self) -> anyhow::Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct UartCharacteristics {
+    pub rx_uuid: Uuid,
+    pub tx_uuid: Uuid,
+}
+```
+
+The boundary should stay narrow. It exists to protect the rest of the application from backend-specific BLE APIs and identifiers.
+
+**Step 2: Wire the module into `ble/mod.rs`**
+
+```rust
+// sbc-service/src/ble/mod.rs
+pub mod transport;
+```
+
+**Step 3: Verify it compiles**
+
+Run: `cd sbc-service && cargo build`
+Expected: Compiles successfully.
+
+**Step 4: Commit**
+
+```bash
+git add sbc-service/src/ble/transport.rs sbc-service/src/ble/mod.rs
+git commit -m "feat: define transport-neutral BLE boundary"
+```
+
+---
+
+## Task 4: BLE Constants
+
+**Files:**
+
+- Modify: `sbc-service/src/ble/mod.rs`
 - Create: `sbc-service/src/ble/constants.rs`
 - Modify: `sbc-service/src/main.rs`
 
@@ -265,6 +383,7 @@ git commit -m "feat: add ProductType domain type with tests"
 
 ```rust
 // sbc-service/src/ble/mod.rs
+pub mod transport;
 pub mod constants;
 ```
 
@@ -321,15 +440,29 @@ git commit -m "feat: add BLE constants (vendor ID, UART UUIDs)"
 
 ---
 
-## Task 4: Advertising Scanner
+## Task 5: Advertising Scanner
 
 **Files:**
 
+- Modify: `sbc-service/Cargo.toml`
 - Create: `sbc-service/src/ble/scanner.rs`
 - Modify: `sbc-service/src/ble/mod.rs`
 - Modify: `sbc-service/src/main.rs`
 
 This is the first hardware-dependent code. It cannot be unit tested — verification is done by running on the Raspberry Pi with Combustion devices nearby.
+
+This task implements the first provisional backend behind the transport boundary. The example below shows a Linux backend implementation of the scanner contract. If validation selects a different backend, keep the same discovery model and identity rules but translate the backend-specific calls accordingly.
+
+**Step 0: Add the provisional backend dependency**
+
+Update `sbc-service/Cargo.toml` with the first backend selected for Phase 1. Example:
+
+```toml
+[dependencies]
+bluer = { version = "0.17", features = ["full"] }
+```
+
+If a different provisional backend is chosen, add that library instead. The transport boundary remains the same either way.
 
 **Step 1: Create the scanner module**
 
@@ -344,6 +477,13 @@ use futures::{pin_mut, StreamExt};
 use super::constants::COMBUSTION_VENDOR_ID;
 use crate::types::ProductType;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisementFamily {
+    DirectProbe,
+    NodeRepeatedProbe,
+    NodeSelf,
+}
+
 /// Information about a discovered Combustion device.
 /// `peripheral_handle` is transport-only; exact Combustion
 /// `product_type + serial_number`
@@ -351,38 +491,45 @@ use crate::types::ProductType;
 #[derive(Debug)]
 pub struct DiscoveredDevice {
     pub peripheral_handle: Address,
+    pub advertisement_family: AdvertisementFamily,
     pub product_type: ProductType,
     pub serial_number: String,
     pub rssi: Option<i16>,
     pub raw_manufacturer_data: Vec<u8>,
 }
 
-fn parse_normalized_serial(product_type: ProductType, data: &[u8]) -> Option<String> {
+fn classify_advertisement_family(product_type: ProductType, data: &[u8]) -> Option<AdvertisementFamily> {
     match product_type {
-        ProductType::PredictiveProbe => {
+        ProductType::PredictiveProbe if data.len() >= 22 => Some(AdvertisementFamily::NodeRepeatedProbe),
+        ProductType::PredictiveProbe if data.len() >= 21 => Some(AdvertisementFamily::DirectProbe),
+        ProductType::MeatNetRepeater
+        | ProductType::GiantGrillGauge
+        | ProductType::Display
+        | ProductType::Booster if data.len() >= 11 => Some(AdvertisementFamily::NodeSelf),
+        _ => None,
+    }
+}
+
+fn parse_normalized_serial(
+    advertisement_family: AdvertisementFamily,
+    data: &[u8],
+) -> Option<String> {
+    match advertisement_family {
+        AdvertisementFamily::DirectProbe | AdvertisementFamily::NodeRepeatedProbe => {
             if data.len() < 5 {
                 return None;
             }
             let serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
             Some(format!("{serial:08X}"))
         }
-        ProductType::MeatNetRepeater
-        | ProductType::GiantGrillGauge
-        | ProductType::Display
-        | ProductType::Booster => {
-            if data.len() >= 11 {
-                let serial_bytes = &data[1..11];
-                let serial = std::str::from_utf8(serial_bytes).ok()?;
-                Some(serial.trim_end_matches('\0').to_string())
-            } else if data.len() >= 5 {
-                // Node repeated-probe advertisements reuse the probe identity layout.
-                let probe_serial = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                Some(format!("{probe_serial:08X}"))
-            } else {
-                None
+        AdvertisementFamily::NodeSelf => {
+            if data.len() < 11 {
+                return None;
             }
+            let serial_bytes = &data[1..11];
+            let serial = std::str::from_utf8(serial_bytes).ok()?;
+            Some(serial.trim_end_matches('\0').to_string())
         }
-        ProductType::Unknown => None,
     }
 }
 
@@ -401,11 +548,13 @@ async fn parse_combustion_device(device: &Device) -> Option<DiscoveredDevice> {
     }
 
     let product_type = ProductType::from_byte(data[0]);
-    let serial_number = parse_normalized_serial(product_type, data)?;
+    let advertisement_family = classify_advertisement_family(product_type, data)?;
+    let serial_number = parse_normalized_serial(advertisement_family, data)?;
     let rssi = device.rssi().await.ok()?;
 
     Some(DiscoveredDevice {
         peripheral_handle: device.address(),
+        advertisement_family,
         product_type,
         serial_number,
         rssi,
@@ -439,9 +588,10 @@ pub async fn run_scanner(
                     seen_devices.insert(addr, discovered.product_type);
 
                     log::info!(
-                        "Combustion device: handle={} key={:?}:{} rssi={:?} data=[{}]",
+                        "Combustion device: handle={} family={:?} key={}:{} rssi={:?} data=[{}]",
                         addr,
-                        discovered.product_type,
+                        discovered.advertisement_family,
+                        discovered.product_type.slug(),
                         discovered.serial_number,
                         discovered.rssi,
                         discovered
@@ -452,7 +602,10 @@ pub async fn run_scanner(
                             .join(" ")
                     );
 
-                    if is_new && discovered.product_type.is_node() {
+                    if is_new
+                        && discovered.advertisement_family == AdvertisementFamily::NodeSelf
+                        && discovered.product_type.is_node()
+                    {
                         on_node_found(addr, &discovered);
                     }
                 }
@@ -478,6 +631,7 @@ pub async fn run_scanner(
 
 ```rust
 // sbc-service/src/ble/mod.rs
+pub mod transport;
 pub mod constants;
 pub mod scanner;
 ```
@@ -513,9 +667,9 @@ async fn main() -> Result<()> {
     log::info!("Starting BLE scan for Combustion devices...");
     ble::scanner::run_scanner(&adapter, |addr, device| {
         log::info!(
-            ">>> Node discovered: handle={} key={:?}:{}",
+            ">>> Node discovered: handle={} key={}:{}",
             addr,
-            device.product_type,
+            device.product_type.slug(),
             device.serial_number
         );
     })
@@ -544,14 +698,14 @@ Expected output (transport handles and serials will vary):
 [INFO] SBC service starting
 [INFO] Using Bluetooth adapter: hci0
 [INFO] Starting BLE scan for Combustion devices...
-[INFO] Combustion device: handle=C2:71:0C:83:FE:50 key=PredictiveProbe:00F45A2C rssi=Some(-65) data=[01 2c 5a f4 00 ...]
-[INFO] Combustion device: handle=C5:BC:E2:1B:48:F6 key=Booster:CR100010EB rssi=Some(-86) data=[05 43 52 31 30 30 30 31 30 45 42 ...]
-[INFO] >>> Node discovered: handle=C5:BC:E2:1B:48:F6 key=Booster:CR100010EB
+[INFO] Combustion device: handle=C2:71:0C:83:FE:50 family=DirectProbe key=predictive-probe:00F45A2C rssi=Some(-65) data=[01 2c 5a f4 00 ...]
+[INFO] Combustion device: handle=C5:BC:E2:1B:48:F6 family=NodeSelf key=booster:CR100010EB rssi=Some(-86) data=[05 43 52 31 30 30 30 31 30 45 42 ...]
+[INFO] >>> Node discovered: handle=C5:BC:E2:1B:48:F6 key=booster:CR100010EB
 ```
 
 Verify:
 
-- Probes show as `PredictiveProbe`
+- Canonical keys use product-type slugs such as `predictive-probe` and `booster`
 - Nodes (Repeater/Display/Booster) show as their correct type
 - `>>> Node discovered` messages appear only for node devices
 - Direct probe, node repeated-probe, and node self-advertisements each produce the expected canonical key format
@@ -560,13 +714,13 @@ Verify:
 **Step 6: Commit**
 
 ```bash
-git add sbc-service/src/ble/scanner.rs sbc-service/src/ble/mod.rs sbc-service/src/main.rs
+git add sbc-service/Cargo.toml sbc-service/src/ble/scanner.rs sbc-service/src/ble/mod.rs sbc-service/src/main.rs
 git commit -m "feat: passive BLE advertising scanner for Combustion devices"
 ```
 
 ---
 
-## Task 5: Node GATT Connection
+## Task 6: Node GATT Connection
 
 **Files:**
 
@@ -575,6 +729,8 @@ git commit -m "feat: passive BLE advertising scanner for Combustion devices"
 - Modify: `sbc-service/src/main.rs`
 
 **Step 1: Create the connection module**
+
+This task extends the provisional backend with node connection behavior behind the transport boundary. The example below shows a Linux backend implementation of the node connection workflow. If validation selects a different backend, preserve the same connect/discover/notify behavior and identity confirmation steps with that backend's API.
 
 ```rust
 // sbc-service/src/ble/connection.rs
@@ -706,6 +862,7 @@ pub async fn listen_uart_notifications(connection: &NodeConnection) -> Result<()
 
 ```rust
 // sbc-service/src/ble/mod.rs
+pub mod transport;
 pub mod connection;
 pub mod constants;
 pub mod scanner;
@@ -762,7 +919,7 @@ async fn main() -> Result<()> {
         .recv()
         .await
         .ok_or_else(|| anyhow::anyhow!("Scanner ended before finding a node"))?;
-    log::info!("Found node at {}, connecting...", node_addr);
+    log::info!("Found node via handle {}, connecting...", node_addr);
 
     // Connect and listen
     let connection = ble::connection::connect_to_node(&adapter, node_addr).await?;
@@ -792,7 +949,7 @@ Expected output:
 [INFO] SBC service starting
 [INFO] Using Bluetooth adapter: hci0
 [INFO] Scanning for MeatNet nodes...
-[INFO] Combustion device: handle=C5:BC:E2:1B:48:F6 key=Booster:CR100010EB rssi=Some(-45) data=[...]
+[INFO] Combustion device: handle=C5:BC:E2:1B:48:F6 family=NodeSelf key=booster:CR100010EB rssi=Some(-45) data=[...]
 [INFO] >>> Node discovered: ...
 [INFO] Found node via handle C5:BC:E2:1B:48:F6, connecting...
 [INFO] Connecting to node via handle C5:BC:E2:1B:48:F6...
@@ -825,179 +982,6 @@ git commit -m "feat: GATT connection to MeatNet node with UART TX notifications"
 
 ---
 
-## Task 6: Reconnection Logic
-
-**Files:**
-
-- Modify: `sbc-service/src/ble/connection.rs`
-- Modify: `sbc-service/src/main.rs`
-
-**Step 1: Write tests for backoff calculation**
-
-Add to `sbc-service/src/ble/connection.rs`:
-
-```rust
-/// Calculate the backoff duration for a given attempt number.
-/// Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
-pub fn backoff_duration(attempt: u32) -> std::time::Duration {
-    todo!()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn backoff_exponential_growth() {
-        assert_eq!(backoff_duration(0), Duration::from_secs(1));
-        assert_eq!(backoff_duration(1), Duration::from_secs(2));
-        assert_eq!(backoff_duration(2), Duration::from_secs(4));
-        assert_eq!(backoff_duration(3), Duration::from_secs(8));
-        assert_eq!(backoff_duration(4), Duration::from_secs(16));
-    }
-
-    #[test]
-    fn backoff_caps_at_30_seconds() {
-        assert_eq!(backoff_duration(5), Duration::from_secs(30));
-        assert_eq!(backoff_duration(6), Duration::from_secs(30));
-        assert_eq!(backoff_duration(100), Duration::from_secs(30));
-    }
-}
-```
-
-**Step 2: Run tests to verify they fail**
-
-Run: `cd sbc-service && cargo test`
-Expected: FAIL — `not yet implemented` panic from `todo!()`
-
-**Step 3: Implement backoff_duration**
-
-```rust
-pub fn backoff_duration(attempt: u32) -> std::time::Duration {
-    let secs = 1u64.checked_shl(attempt).unwrap_or(30).min(30);
-    std::time::Duration::from_secs(secs)
-}
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd sbc-service && cargo test`
-Expected: All tests pass (ProductType tests + backoff tests).
-
-**Step 5: Add reconnection loop to main.rs**
-
-Replace the connection section in main.rs with a reconnection loop:
-
-```rust
-// sbc-service/src/main.rs
-mod ble;
-mod types;
-
-use anyhow::Result;
-use bluer::{Address, DiscoveryFilter};
-use tokio::sync::mpsc;
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
-    env_logger::init();
-    log::info!("SBC service starting");
-
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
-    log::info!("Using Bluetooth adapter: {}", adapter.name());
-    adapter.set_powered(true).await?;
-
-    adapter
-        .set_discovery_filter(DiscoveryFilter {
-            transport: bluer::DiscoveryTransport::Le,
-            ..Default::default()
-        })
-        .await?;
-
-    // Channel for the scanner to notify us when a node is found
-    let (node_tx, mut node_rx) = mpsc::channel::<Address>(4);
-
-    // Spawn the scanner in the background
-    let scanner_adapter = adapter.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ble::scanner::run_scanner(&scanner_adapter, move |addr, _device| {
-            let _ = node_tx.try_send(addr);
-        })
-        .await
-        {
-            log::error!("Scanner error: {}", e);
-        }
-    });
-
-    // Wait for the first node to be discovered
-    log::info!("Scanning for MeatNet nodes...");
-    let node_addr = node_rx
-        .recv()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Scanner ended before finding a node"))?;
-    log::info!("Found node at {}", node_addr);
-
-    // Connection loop with reconnection
-    let mut attempt: u32 = 0;
-    loop {
-        match ble::connection::connect_to_node(&adapter, node_addr).await {
-            Ok(connection) => {
-                attempt = 0; // Reset backoff on successful connection
-                log::info!("Node connection established, listening for UART data...");
-
-                if let Err(e) = ble::connection::listen_uart_notifications(&connection).await {
-                    log::warn!("UART listener error: {}", e);
-                }
-
-                // If we get here, the notification stream ended (disconnect)
-                log::warn!("Node disconnected");
-            }
-            Err(e) => {
-                log::warn!("Connection to node failed: {}", e);
-            }
-        }
-
-        let backoff = ble::connection::backoff_duration(attempt);
-        log::info!("Reconnecting in {:?} (attempt {})...", backoff, attempt + 1);
-        tokio::time::sleep(backoff).await;
-        attempt += 1;
-    }
-}
-```
-
-**Step 6: Build and run tests**
-
-Run: `cd sbc-service && cargo test && cargo build`
-Expected: All tests pass, builds successfully.
-
-**Step 7: Test on hardware**
-
-Run on the Raspberry Pi:
-
-```bash
-RUST_LOG=info cargo run
-```
-
-Test reconnection by power-cycling the MeatNet node while the service is running.
-
-Expected behavior:
-
-1. Service connects and receives UART data normally
-2. When node is powered off: `UART TX notification stream ended (device disconnected?)`
-3. Backoff messages: `Reconnecting in 1s (attempt 1)...`, `Reconnecting in 2s (attempt 2)...`
-4. When node is powered back on: `Connected to node`, data resumes
-5. Backoff resets to 1s after successful reconnection
-
-**Step 8: Commit**
-
-```bash
-git add sbc-service/src/ble/connection.rs sbc-service/src/main.rs
-git commit -m "feat: automatic reconnection with exponential backoff"
-```
-
----
-
 ## Task 7: Graceful Shutdown
 
 **Files:**
@@ -1006,97 +990,71 @@ git commit -m "feat: automatic reconnection with exponential backoff"
 
 **Step 1: Add Ctrl+C signal handling**
 
-Update main.rs to handle graceful shutdown:
+Update `main.rs` so the validation CLI exits cleanly on `Ctrl+C`:
 
 ```rust
 // sbc-service/src/main.rs
-mod ble;
-mod types;
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
-use anyhow::Result;
-use bluer::{Address, DiscoveryFilter};
-use tokio::sync::mpsc;
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
-    env_logger::init();
-    log::info!("SBC service starting");
-
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
-    log::info!("Using Bluetooth adapter: {}", adapter.name());
-    adapter.set_powered(true).await?;
-
-    adapter
-        .set_discovery_filter(DiscoveryFilter {
-            transport: bluer::DiscoveryTransport::Le,
-            ..Default::default()
-        })
-        .await?;
-
-    let (node_tx, mut node_rx) = mpsc::channel::<Address>(4);
-
-    let scanner_adapter = adapter.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ble::scanner::run_scanner(&scanner_adapter, move |addr, _device| {
-            let _ = node_tx.try_send(addr);
-        })
-        .await
+async fn scan(scan_seconds: u64) -> Result<()> {
+    let transport = BtleplugTransport::new_default().await?;
+    println!("Scanning for {scan_seconds}s...");
+    let discoveries =
+        match await_with_shutdown_grace("scan", transport.scan(Duration::from_secs(scan_seconds)))
+            .await?
         {
-            log::error!("Scanner error: {}", e);
-        }
-    });
+            OperationOutcome::Completed(discoveries) => discoveries,
+            OperationOutcome::Interrupted(_) => {
+                println!("Scan interrupted. Exiting cleanly.");
+                return Ok(());
+            }
+        };
 
-    log::info!("Scanning for MeatNet nodes... (Ctrl+C to stop)");
-    let node_addr = tokio::select! {
-        addr = node_rx.recv() => {
-            addr.ok_or_else(|| anyhow::anyhow!("Scanner ended before finding a node"))?
-        }
-        _ = tokio::signal::ctrl_c() => {
-            log::info!("Shutting down (no node found)");
+    // print discoveries...
+    Ok(())
+}
+
+async fn inspect(...) -> Result<()> {
+    // connect and inspect...
+
+    let notifications = match await_with_shutdown_grace(
+        "notification collection",
+        peripheral.listen_notifications(Duration::from_secs(listen_seconds)),
+    )
+    .await?
+    {
+        OperationOutcome::Completed(notifications) => notifications,
+        OperationOutcome::Interrupted(_) => {
+            disconnect_with_report(peripheral.as_ref()).await;
+            println!("Shutdown complete.");
             return Ok(());
         }
     };
-    log::info!("Found node at {}", node_addr);
 
-    // Connection loop with reconnection
-    let mut attempt: u32 = 0;
-    loop {
-        match ble::connection::connect_to_node(&adapter, node_addr).await {
-            Ok(connection) => {
-                attempt = 0;
-                log::info!("Node connection established, listening for UART data...");
+    // print notifications...
+    peripheral.disconnect().await?;
+    Ok(())
+}
 
-                tokio::select! {
-                    result = ble::connection::listen_uart_notifications(&connection) => {
-                        if let Err(e) = result {
-                            log::warn!("UART listener error: {}", e);
-                        }
-                        log::warn!("Node disconnected");
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        log::info!("Shutting down...");
-                        let _ = connection.device.disconnect().await;
-                        return Ok(());
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("Connection to node failed: {}", e);
+async fn await_with_shutdown_grace<F, T>(label: &str, future: F) -> Result<OperationOutcome<T>>
+where
+    F: Future<Output = Result<T>>,
+{
+    tokio::pin!(future);
+
+    tokio::select! {
+        result = &mut future => result.map(OperationOutcome::Completed),
+        _ = tokio::signal::ctrl_c() => {
+            println!(
+                "Shutdown requested during {label}; waiting up to {}s for the current operation to settle...",
+                SHUTDOWN_GRACE_PERIOD.as_secs()
+            );
+
+            match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut future).await {
+                Ok(Ok(value)) => Ok(OperationOutcome::Interrupted(Some(value))),
+                Ok(Err(_)) | Err(_) => Ok(OperationOutcome::Interrupted(None)),
             }
         }
-
-        let backoff = ble::connection::backoff_duration(attempt);
-        log::info!("Reconnecting in {:?} (attempt {})...", backoff, attempt + 1);
-
-        tokio::select! {
-            _ = tokio::time::sleep(backoff) => {}
-            _ = tokio::signal::ctrl_c() => {
-                log::info!("Shutting down during reconnect backoff");
-                return Ok(());
-            }
-        }
-        attempt += 1;
     }
 }
 ```
@@ -1118,7 +1076,6 @@ Test Ctrl+C at different stages:
 
 1. During initial scanning (before a node is found) — should exit cleanly
 2. While connected and receiving data — should disconnect from node and exit
-3. During reconnection backoff — should exit immediately
 
 Expected: Clean shutdown with no errors in all cases.
 
@@ -1141,7 +1098,7 @@ Run these checks to confirm Phase 1 is complete:
    cd sbc-service && cargo test
    ```
 
-   Expected: All tests pass (ProductType + backoff).
+  Expected: All tests pass.
 
 2. **Builds without warnings:**
 
@@ -1164,9 +1121,7 @@ Run these checks to confirm Phase 1 is complete:
    - [ ] UART TX notifications stream in continuously
    - [ ] ProbeStatus (0x45) messages appear periodically
    - [ ] Heartbeat (0x49) messages appear periodically
-   - [ ] Power-cycling the node triggers reconnection with backoff
-   - [ ] Reconnection succeeds and data resumes after node powers back on
-   - [ ] Ctrl+C exits cleanly at any point
+  - [ ] Ctrl+C exits cleanly at any point
 
 4. **Code compiles on both dev machine and Raspberry Pi:**
    ```bash
